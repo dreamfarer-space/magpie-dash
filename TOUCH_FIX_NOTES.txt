@@ -1,0 +1,63 @@
+触摸修复说明（本次仅编译，未打开 COM9、未烧录）
+
+判断依据
+
+1. 已确认的软件缺陷：旧 gt_read_point() 将 GT911 的 ready=0 返回为 false，
+   touch_cb() 又把 false 直接解释为 RELEASED。ready=0 只代表没有新帧，不能
+   代表抬手。现在区分 NoData / Pressed / Released / Error / Cancelled，空轮询
+   保持状态，收到 ready+0 contacts 才正常抬手；失联 300ms 则保护性释放。
+2. Y 映射有实测依据：原始 251 -> 屏幕 20，即 -raw_y+271。该翻转现在纳入
+   board.h 的 TOUCH_Y_A/B，不再在别处重复翻转。
+3. X 的现有记录不足以区分显示窗口偏移与触摸偏移：449..474 是触摸控制器的
+   输出，不是独立测得的面板像素位置。帧缓冲截图发生在 flush 的面板写入前，
+   也无法验证玻璃可视区的位置。Arduino_GFX 实际使用 480x272、rotation=0，
+   构造默认 col/row offsets 全为 0，writeAddrWindow 仅加这些 offsets；当前
+   代码中不存在 +40/+50 的平移。此证据不排除硬件可视区偏移。
+   因此没有臆造 X=-45 的修复参数，也没有挪动任何页面布局。
+
+代码改动
+
+- firmware/magepie_dash/board.h：集中 X/Y 仿射宏、预热/超时/边缘容差，
+  显示窗口偏移宏（仍为 0）及现场标定说明。
+- display_port.cpp/.h：修正触摸帧状态机、INT 二次复位输出模式，原始坐标先映射
+  再判断边界；校准采样在边界判断之前，支持 raw X 超出 479 的控制器量程。
+  启动只读打印 GT911 0x8047 配置中的 X/Y output max；不写控制器校准配置。
+  日志同时输出 raw/map。已知 Y 翻转保留在仿射变换中。
+- touch_calibration.cpp/.h：四角采样、每次按压稳定性检查、独立 X/Y 最小二乘
+  拟合、中心留出验证。最大残差超过 12px 不应用；通过后仅在 RAM 中应用，
+  串口打印四条可复制回 board.h 的宏。不写 NVS，不修改 WiFi 设置。
+- touch_math.h、touch_math_checks.cpp：共享纯坐标数学与编译期回归检查。
+  测试中的 -45 等数值只是明确标注的合成用例，不是本板校准值。
+- ui.cpp：仅增加校准模块 include、CAL 打开/关闭钩子；所有页面布局未动。
+- magepie_dash.ino：t 命令同时打印 raw/map，仍然采样 15 秒。
+- flash.sh：无参数仅编译，只有显式 flash 参数才上传；日志放 build_logs，
+  不再写系统 /tmp；编译失败能完整返回错误状态。
+
+现场验证（用户自行烧录后）
+
+1. 串口 921600，启动等预热完成，保存 [lcd]、[touch] config 两行。
+2. 发 c，先看四条白色边框是否全部贴屏幕可视区边缘，且没有裁切、回卷或宽黑带。
+   若明显整体横移/缺边，停止触摸标定；提供实物照片及日志，先定显示窗口偏移，
+   在显示初始化层调整，不能让触摸标定掩盖显示问题。
+3. 边框正确时按屏幕提示依次点四角绿色小十字的中心（TL、TR、BL、BR），
+   最后点中心。每个点静止按约半秒，再完全抬手，等提示切换下一个点。
+   目标是 (14,14)、(466,14)、(14,258)、(466,258)、(240,136)。
+   校准期间不要发 t，t 会独占读取触摸帧。发 x 再 c 可重试。
+4. 出现 [cal] PASS 后发 x，测试顶部各 tab 的中心及左右部分，确认不串按钮。
+   按住同一位置时不应反复出现 down/up；抬手应出现 up (frame)。
+   不要用主页顶部的长按作测试，它本来就会重置 WiFi。
+5. RAM 映射重启会丢失。保存串口输出的四条 #define，复制到 board.h 后重新
+   编译烧录，才是永久修正。现场数据未采到前，不能声称 X 已实机校准完成。
+
+编译与保护验证
+
+实际执行：cd /d/esp32/magepie-esp32 && bash flash.sh
+首轮结果：exit 0；Sketch 1451383 bytes，Global variables 99536 bytes。
+编译期回归检查通过，覆盖上下翻转、缩放/偏移拟合、噪声、退化采样、边界钳位、
+无新帧保持按下、明确抬手和超时。以 build_logs/build.log 为最终编译记录。
+
+已比对改前备份：ui.cpp 除校准 include/begin/end 外完全相同（忽略换行格式）；
+外部 lv_conf.h 和 sketch 根目录四份字体 .c 的 SHA-256 均未变化。
+固件输出：D:/esp32/dist/magepie_dash.ino.bin
+完整烧录镜像：D:/esp32/dist/magepie_dash.ino.merged.bin
+注意 dist 里已有的 *_flashed.bin 是先前遗留文件，不是本次编译的新产物。

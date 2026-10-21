@@ -1,0 +1,17 @@
+# build output and local captures never belong in the repo
+build_logs/
+shots/
+out/
+dist/
+build/
+__pycache__/
+*.pyc
+*.log
+*.png
+!docs/*.png
+
+# editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
