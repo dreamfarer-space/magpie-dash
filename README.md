@@ -55,7 +55,7 @@ Terminal style: the top row is a shell prompt (`user@magpie:~/agents$`, blinking
 
 The shipped build speaks **English**; Settings → `language` switches the whole panel to **中文** in one tap. The same choice drives the WiFi setup page the board serves to your phone.
 
-- Everything follows it: pane titles, the htop tab bar, quota wording (`5h quota` / `5 小时额度`), countdowns (`resets in 3d 21h` / `3 天 21 小时后重置`), relative times, the weekday in the prompt bar, the agent catchphrases and the buttons on the touch keyboard.
+- Panel text follows it: pane titles, the htop tab bar, quota wording (`5h quota` / `5 小时额度`), countdowns (`resets in 3d 21h` / `3 天 21 小时后重置`), quota reset dates, relative times, the weekday in the prompt bar, the agent catchphrases and the buttons on the touch keyboard. Labels that are really technical markers stay put in both languages (`token`, `in` / `out` / `cache`, `usb`, `src:`), and the touch-calibration prompts are English-only, being a service screen.
 - Strings live in [`firmware/magepie_dash/i18n.cpp`](firmware/magepie_dash/i18n.cpp), keyed by the Chinese text: a call site reads `T("等待网关")`, and an entry that is missing degrades to Chinese rather than a blank label. `python tools/check_i18n.py` (run in CI) fails when a `T()` has no entry or a translation drops a `%d`.
 - Switching rebuilds the LVGL object tree, because the column layout depends on the wording. That costs ~0.95 s on the board — the same work a cold boot does — and the choice is stored in NVS, so the board comes back in the language you left it in.
 - Serial `U` toggles it without touching the screen, which is how both language sets of screenshots were captured.
@@ -64,7 +64,7 @@ The shipped build speaks **English**; Settings → `language` switches the whole
 |---|---|
 | ![English home page](docs/screen-home-en.png) | ![English config page](docs/screen-config-en.png) |
 
-The screenshots in this README were captured with the Chinese build; send `U` on your board to reproduce them in English.
+The page overview further up was captured with the Chinese build; the two images above are the English default. Serial `U` flips a board either way.
 
 ## Hardware
 

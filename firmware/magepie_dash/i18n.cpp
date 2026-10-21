@@ -142,37 +142,21 @@ static const Entry kTbl[] = {
 
 static const unsigned kTblN = sizeof(kTbl) / sizeof(kTbl[0]);
 
-// Same literals come back on every repaint (page rebuilds, 15 s data updates),
-// and string literals are pooled, so remembering the last few answers turns the
-// table into a pointer compare for almost every call.
-struct Hit {
-    const char *zh;
-    const char *en;
-};
-static Hit s_hits[4];
-
+// No memoisation here on purpose: T() is called from the UI task AND from the
+// fetch task (gateway.cpp formats quota reset stamps before publishing), so any
+// cache would be shared mutable state across cores. A linear scan of a const
+// table is a few microseconds and the whole tree only asks for ~200 strings on
+// a data update, which is noise next to the repaint.
 uint8_t lang_get(void) { return s_lang; }
 
-void lang_set(uint8_t lang) {
-    s_lang = (lang == LANG_ZH) ? LANG_ZH : LANG_EN;
-    for (int i = 0; i < 4; i++) s_hits[i].zh = s_hits[i].en = nullptr;
-}
+void lang_set(uint8_t lang) { s_lang = (lang == LANG_ZH) ? LANG_ZH : LANG_EN; }
 
 const char *T(const char *zh) {
     if (!zh || !*zh) return "";
     if (s_lang == LANG_ZH) return zh;
-    for (int i = 0; i < 4; i++)
-        if (s_hits[i].zh == zh) return s_hits[i].en;  // same literal, cached
-    static unsigned next = 0;
-    const char *out = zh;
-    for (unsigned i = 0; i < kTblN; i++) {
-        if (!strcmp(kTbl[i].zh, zh)) {
-            out = kTbl[i].en;
-            break;
-        }
-    }
-    s_hits[next++ & 3] = {zh, out};
-    return out;
+    for (unsigned i = 0; i < kTblN; i++)
+        if (!strcmp(kTbl[i].zh, zh)) return kTbl[i].en;
+    return zh;  // not translated yet: readable Chinese beats a blank label
 }
 
 // Avatar catchphrases: the shipped table in agent_sprites.h is Chinese, so the

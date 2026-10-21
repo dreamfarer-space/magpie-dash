@@ -562,6 +562,16 @@ static void win_long(const char *name, char *out, size_t n) {
         snprintf(out, n, "%s", group[0] ? group : name);
 }
 
+// When a quota window resets. The raw stamp is kept in the model and formatted
+// here, so switching the interface language re-renders the date instead of
+// leaving it in the language the fetch ran in; a provider that only sends a
+// label ("205.26 / 900") keeps that label.
+static void reset_text(const QuotaWindow &w, char *out, size_t n) {
+    out[0] = 0;
+    if (w.resetIso[0]) fmt_reset(w.resetIso, out, n);
+    if (!out[0]) snprintf(out, n, "%s", w.reset);
+}
+
 static uint32_t remain_col(float rem) {
     return rem >= 50 ? C_GREEN : (rem >= 20 ? C_AMBER : C_RED);
 }
@@ -2198,7 +2208,7 @@ void ui_update(const DashData &d) {
     char reset[40] = "";
     if (wr) {
         fmt_countdown((time_t)wr->reset_at, reset, sizeof(reset));
-        if (!reset[0]) snprintf(reset, sizeof(reset), "%s", wr->reset);
+        if (!reset[0]) reset_text(*wr, reset, sizeof(reset));
     }
 
     // a new agent took over: everyone hops and it says hello
@@ -2414,7 +2424,9 @@ void ui_update(const DashData &d) {
             tbar_set(U.q_bar[i][j], shown, remain_col(rem));
             set_txtf(U.q_pct[i][j], "%.0f%%", shown);
             set_color(U.q_pct[i][j], remain_col(rem));
-            set_txt(U.q_rst[i][j], q->win[j].reset);
+            char rb[20];
+            reset_text(q->win[j], rb, sizeof(rb));
+            set_txt(U.q_rst[i][j], rb);
         }
     }
 

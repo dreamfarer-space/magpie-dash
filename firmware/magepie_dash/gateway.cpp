@@ -117,14 +117,15 @@ static bool fetch_quotas(DashData &d) {
             copy_str(qw.name, sizeof(qw.name), w["name"] | "");
             qw.used = w["used"] | 0.0f;
             qw.remaining = w["remaining"] | 0.0f;
+            // Keep the timestamp raw: the panel formats it when it draws, so an
+            // interface language switch re-renders instead of freezing the date
+            // in whichever language the fetch happened to run in.
             char raw[32] = {0};
             copy_str(raw, sizeof(raw), w["resetsAt"] | "");
-            fmt_reset(raw, qw.reset, sizeof(qw.reset));
+            copy_str(qw.resetIso, sizeof(qw.resetIso), raw);
             qw.reset_at = (int64_t)iso_to_epoch(raw);
-            if (!qw.reset[0]) {
-                const char *disp = w["display"] | "";
-                copy_str(qw.reset, sizeof(qw.reset), disp);
-            }
+            // A window without a timestamp can still carry a label ("205.26 / 900").
+            copy_str(qw.reset, sizeof(qw.reset), raw[0] ? "" : (const char *)(w["display"] | ""));
             q.nwin++;
         }
         d.nprov++;

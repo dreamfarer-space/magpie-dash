@@ -14,9 +14,9 @@
 uint8_t lang_get(void);
 void lang_set(uint8_t lang);
 
-// Look up the English text for a Chinese source string. Pass a string LITERAL:
-// the lookup is memoised by pointer (a fresh buffer at a reused address would
-// return the previous translation), and a literal is what the table is keyed by.
+// Look up the English text for a Chinese source string. Pass a string literal
+// (that is what the table is keyed by). Read-only and re-entrant: it may be
+// called from the UI task and from the fetch task at the same time.
 // Missing entries return the Chinese, so a half-translated build is readable
 // rather than blank.
 const char *T(const char *zh);

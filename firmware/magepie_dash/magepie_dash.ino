@@ -259,9 +259,9 @@ static void mock_data(DashData &d) {
     strcpy(c.user, "alice@example.com");
     c.nwin = 2;
     strcpy(c.win[0].name, "5 hours"); c.win[0].remaining = 100;
-    snprintf(c.win[0].reset, sizeof(c.win[0].reset), T("%d月%d日 %02d:%02d"), 10, 19, 18, 59);  // demo: follows the UI language
+    strcpy(c.win[0].resetIso, "2026-10-19T18:59:00+08:00");  // raw, like the gateway sends it
     strcpy(c.win[1].name, "7 days"); c.win[1].remaining = 77;
-    snprintf(c.win[1].reset, sizeof(c.win[1].reset), T("%d月%d日 %02d:%02d"), 10, 22, 9, 0);
+    strcpy(c.win[1].resetIso, "2026-10-22T09:00:00+08:00");
     c.win[1].reset_at = time(nullptr) + 3 * 86400 + 21 * 3600;
     QuotaProvider &g = d.prov[1];
     strcpy(g.provider, "antigravity"); strcpy(g.name, "Antigravity"); strcpy(g.plan, "Google AI Pro");
@@ -270,12 +270,13 @@ static void mock_data(DashData &d) {
     const char *gn[4] = {"Gemini · 7 days", "Gemini · 5 hours", "Claude & GPT · 7 days", "Claude & GPT · 5 hours"};
     const float gr[4] = {89, 100, 42, 10};
     for (int i = 0; i < 4; i++) { strcpy(g.win[i].name, gn[i]); g.win[i].remaining = gr[i]; }
-    snprintf(g.win[0].reset, sizeof(g.win[0].reset), T("%d月%d日 %02d:%02d"), 10, 24, 23, 52);
+    strcpy(g.win[0].resetIso, "2026-10-24T23:52:00+08:00");
     QuotaProvider &w = d.prov[2];
     strcpy(w.provider, "workbuddy"); strcpy(w.name, "WorkBuddy"); strcpy(w.plan, "Free");
     strcpy(w.user, "择梦舟");
     w.nwin = 1;
-    strcpy(w.win[0].name, "Credits"); w.win[0].remaining = 77; strcpy(w.win[0].reset, "205.26 / 900");
+    strcpy(w.win[0].name, "Credits"); w.win[0].remaining = 77;
+    strcpy(w.win[0].reset, "205.26 / 900");  // label, no timestamp: stays as sent
 
     d.calls = 9410; d.errors = 14;
     d.tok_in = 29000000; d.tok_out = 5300000; d.tok_cache = 1060000000ULL;
@@ -382,6 +383,10 @@ static void handle_command(uint8_t c) {
             cfg_defaults();
             cfg_save();
             ui_settings_refresh();
+            // The shipped default language is English: rebuilding through the
+            // normal switch keeps the screen and the stored value in step,
+            // instead of flipping to English only after the next boot.
+            ui_set_language(g_cfg.lang);
             Serial.println("[cfg] reset to defaults");
         }
         if (c == 'T') ui_test_toggle();

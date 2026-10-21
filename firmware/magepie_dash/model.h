@@ -13,7 +13,8 @@ struct QuotaWindow {
     char name[16];      // "5 hours" / "7 days" / "Credits"
     float used;         // percent used 0..100
     float remaining;    // percent left
-    char reset[20];     // "7d 10月19日 18:59" or ""
+    char reset[20];     // provider's own label when it has no timestamp ("205.26 / 900")
+    char resetIso[26];  // raw resetsAt, formatted when drawn so it follows the UI language
     int64_t reset_at = 0;  // epoch seconds, 0 when unknown
 };
 
