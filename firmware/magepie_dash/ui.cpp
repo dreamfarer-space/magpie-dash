@@ -76,7 +76,8 @@ static struct {
         *st_bar5[3], *st_bar7[3], *st_reset[3], *st_conn[3], *st_src[3];
     // agents
     lv_obj_t *ag_list, *ag_row[AG_ROWS], *ag_icon[AG_ROWS], *ag_name[AG_ROWS],
-        *ag_detail[AG_ROWS], *ag_calls[AG_ROWS], *ag_live[AG_ROWS], *ag_tab[UI_PAGES];
+        *ag_detail[AG_ROWS], *ag_calls[AG_ROWS], *ag_live[AG_ROWS], *ag_state[AG_ROWS],
+        *ag_tab[UI_PAGES];
     char ag_id[AG_ROWS][16];
     // agent detail sheet (agents page)
     lv_obj_t *sh, *sh_name, *sh_model, *sh_num[4], *sh_share, *sh_bar, *sh_last, *sh_follow;
@@ -358,6 +359,7 @@ struct Avatar {
     int mode;
     uint8_t pokes, say;
     uint32_t poke_ms;
+    uint32_t breathe_ms;  // 0 = not breathing
 };
 
 static Avatar s_av_home, s_av_state[3], s_av_sheet;
@@ -378,6 +380,46 @@ static void avatar_hop(Avatar &a) {
     lv_anim_set_time(&an, 450);
     lv_anim_set_path_cb(&an, lv_anim_path_bounce);
     lv_anim_start(&an);
+    a.breathe_ms = 0;  // the loop was cancelled above; the next sync re-arms it
+}
+
+// Idle motion: a slow 3 px rise-and-fall loop, faster while the agent is busy.
+// It uses the same translate_y executor as the hop, so anything that wants to
+// hop must stop the loop first (lv_anim_del does that).
+static void avatar_breathe(Avatar &a, bool on, uint32_t period) {
+    if (!a.box) return;
+    if (!g_cfg.anim || !on) {
+        if (a.breathe_ms) {
+            a.breathe_ms = 0;
+            lv_anim_del(a.box, anim_translate_y);
+            lv_obj_set_style_translate_y(a.box, 0, 0);
+        }
+        return;
+    }
+    if (a.breathe_ms == period) return;  // already running at this speed
+    a.breathe_ms = period;
+    lv_anim_del(a.box, anim_translate_y);
+    lv_anim_t an;
+    lv_anim_init(&an);
+    lv_anim_set_var(&an, a.box);
+    lv_anim_set_exec_cb(&an, anim_translate_y);
+    lv_anim_set_values(&an, 0, -3);
+    lv_anim_set_time(&an, period);
+    lv_anim_set_playback_time(&an, period);
+    lv_anim_set_repeat_count(&an, LV_ANIM_REPEAT_INFINITE);
+    lv_anim_set_path_cb(&an, lv_anim_path_ease_in_out);
+    lv_anim_start(&an);
+}
+
+// Which avatars are on screen right now, and how fast they should breathe.
+static bool s_live_state = false;
+
+static void avatars_sync_motion(bool busy) {
+    const uint32_t period = busy ? 800 : 1900;
+    avatar_breathe(s_av_home, s_page == PG_HOME, period);
+    for (int i = 0; i < 3; i++)
+        avatar_breathe(s_av_state[i], s_page == PG_STATE_THINK + i, period);
+    avatar_breathe(s_av_sheet, U.sh && !lv_obj_has_flag(U.sh, LV_OBJ_FLAG_HIDDEN), period);
 }
 
 static void avatar_say(Avatar &a, const char *line, uint32_t ms) {
@@ -840,6 +882,7 @@ static void build_agents() {
         U.ag_detail[i] = txt(rt, "", 0, 0, &ark12, C_MUTED);
         lv_label_set_long_mode(U.ag_detail[i], LV_LABEL_LONG_DOT);
         lv_obj_set_style_max_width(U.ag_detail[i], 180, 0);
+        U.ag_state[i] = txt(rt, "", 0, 0, &ark12, C_MUTED);
         U.ag_calls[i] = txt(rt, "", 0, 0, &ark12, C_GREEN);
         show(r, false);
     }
@@ -1772,6 +1815,7 @@ static void apply_page(int page) {
     const int prev = s_page;
     s_page = page % UI_PAGES;
     if (s_page != prev) close_overlays();  // overlays live on the top layer
+    avatars_sync_motion(s_live_state);
     if (U.sh && s_page != PG_AGENTS) sheet_close();
     for (int i = 0; i < UI_PAGES; i++) {
         if (!pg[i]) continue;
@@ -1872,6 +1916,10 @@ void ui_tick() {
     // the live dot on the home card blinks while the agent is at work
     static bool blink = false;
     blink = !blink;
+    for (int i = 0; i < AG_ROWS; i++) {
+        if (!U.ag_live[i] || lv_obj_has_flag(U.ag_live[i], LV_OBJ_FLAG_HIDDEN)) continue;
+        lv_obj_set_style_bg_opa(U.ag_live[i], blink ? LV_OPA_COVER : LV_OPA_40, 0);
+    }
     if (U.hm_dot && s_av_home.mode == AV_THINK)
         lv_obj_set_style_bg_opa(U.hm_dot, blink ? LV_OPA_COVER : LV_OPA_30, 0);
     else if (U.hm_dot)
@@ -2089,6 +2137,13 @@ void ui_update(const DashData &d) {
     lv_obj_set_style_bg_color(U.hm_dot, lv_color_hex(live ? C_GREEN : sk->accent), 0);
     avatar_set(s_av_home, sk);
     avatar_mode(s_av_home, live ? AV_THINK : AV_IDLE);
+    static bool prev_live = false;
+    if (prev_live && !live && d.gw) {  // work just finished
+        avatar_hop(s_av_home);
+        avatar_say(s_av_home, "做完了", 1800);
+    }
+    prev_live = live;
+    s_live_state = live;
     if (switched) {
         avatar_hop(s_av_home);
         avatar_say(s_av_home, sk->say[0], 2500);
@@ -2192,7 +2247,7 @@ void ui_update(const DashData &d) {
     static AgentView views[AG_ROWS];
     const int nv = agent_views(d, views, AG_ROWS);
     for (int pgid = 0; pgid < UI_PAGES; pgid++)
-        if (U.ag_tab[pgid]) set_txtf(U.ag_tab[pgid], "Agent %d", nv);
+        if (U.ag_tab[pgid]) set_txt(U.ag_tab[pgid], "Agent");  // count lives in the list
     for (int i = 0; i < AG_ROWS; i++) {
         show(U.ag_row[i], i < nv);
         if (i >= nv) {
@@ -2203,7 +2258,23 @@ void ui_update(const DashData &d) {
         strncpy(U.ag_id[i], v.id, sizeof(U.ag_id[i]) - 1);
         U.ag_id[i][sizeof(U.ag_id[i]) - 1] = 0;
         logo_set(U.ag_icon[i], skin_for(v.id)->s);
-        show(U.ag_live[i], agent_live(agent_stat(d, v.id)));
+        const AgentRow *ast = agent_stat(d, v.id);
+        const bool alives = agent_live(ast);
+        show(U.ag_live[i], alives);
+        // working / finished / idle, spelled out: a bare dot was not readable
+        if (alives) {
+            set_txt(U.ag_state[i], "工作中");
+            set_color(U.ag_state[i], C_AMBER);
+        } else if (ast && ast->today) {
+            set_txt(U.ag_state[i], "已完成");
+            set_color(U.ag_state[i], C_GREEN);
+        } else if (ast && (ast->last || ast->calls)) {
+            set_txt(U.ag_state[i], "空闲");
+            set_color(U.ag_state[i], C_MUTED);
+        } else {
+            set_txt(U.ag_state[i], "未使用");
+            set_color(U.ag_state[i], C_FAINT);
+        }
         set_txt_fit(U.ag_name[i], agent_label(v.id, v.name));
         set_color(U.ag_name[i], v.calls ? C_TEXT : C_MUTED);
         set_txt(U.ag_detail[i], v.model[0] ? v.model : "默认模型");
@@ -2360,6 +2431,8 @@ void ui_update(const DashData &d) {
     for (int k = 0; k < 2; k++)
         set_txtf(U.r_sum[k], "今天 %u 次调用 · %s token", (unsigned)d.today_calls,
                  fmt_count((uint64_t)d.today_tokens, b1, sizeof(b1)));
+
+    avatars_sync_motion(live);
 }
 
 // ---------------------------------------------------------------------------
