@@ -102,7 +102,11 @@ static void shoot_all(bool only_current) {
     Serial.setTxTimeoutMs(2000);
     Serial.println("SHOTS_BEGIN");
     static const char *hexd = "0123456789abcdef";
-    char line[129];
+    // "OOOOO:<128 hex>*SS": byte offset + payload + byte-sum. The host places
+    // every line by its offset and drops one that fails the sum, so a lost byte
+    // or another task's log line in the middle can no longer shift the rest of
+    // the frame (that used to show up as colour garbage), and it re-asks.
+    char line[8 + 128 + 4];
     const int cur = ui_cur_page();
     for (int i = only_current ? cur : 0; i < (only_current ? cur + 1 : UI_PAGES); i++) {
         if (!only_current) ui_goto(i);
@@ -113,19 +117,20 @@ static void shoot_all(bool only_current) {
         display_capture(nullptr);
         Serial.printf("SHOT %d %d %d %u\n", i, LCD_W, LCD_H, (unsigned)(LCD_W * LCD_H * 2));
         const uint8_t *px = (const uint8_t *)g_shot_buf;
-        uint32_t n = LCD_W * LCD_H * 2, col = 0;
-        for (uint32_t k = 0; k < n; k++) {
-            line[col++] = hexd[px[k] >> 4];
-            line[col++] = hexd[px[k] & 0xF];
-            if (col >= 128) {
-                line[col] = 0;
-                while (Serial.availableForWrite() < 140) delay(1);
-                Serial.println(line);
-                col = 0;
+        const uint32_t n = LCD_W * LCD_H * 2;
+        for (uint32_t k = 0; k < n; k += 64) {
+            int col = snprintf(line, sizeof(line), "%05x:", (unsigned)k);
+            uint8_t sum = 0;
+            for (uint32_t j = k; j < k + 64 && j < n; j++) {
+                line[col++] = hexd[px[j] >> 4];
+                line[col++] = hexd[px[j] & 0xF];
+                sum += px[j];
             }
-        }
-        if (col) {
+            line[col++] = '*';
+            line[col++] = hexd[sum >> 4];
+            line[col++] = hexd[sum & 0xF];
             line[col] = 0;
+            while (Serial.availableForWrite() < 160) delay(1);
             Serial.println(line);
         }
         Serial.println("END");
@@ -217,6 +222,31 @@ static void page_timing() {
     Serial.println("PERF_END");
 }
 
+// Serial 'P': press the tabs through the input driver and time touch-down ->
+// last pixel on the panel, i.e. the latency a finger sees on a page switch
+// (tabs switch on press, so the hold before the release is not part of it).
+static void tap_latency() {
+    static const int order[12] = {1, 2, 3, 4, 5, 0, 3, 1, 5, 2, 4, 0};
+    Serial.println("TAPLAT_BEGIN");
+    ui_goto(0);
+    display_wait_idle(1000);
+    uint32_t sum = 0, worst = 0;
+    for (int k = 0; k < 12; k++) {
+        vTaskDelay(pdMS_TO_TICKS(250));  // separate taps: no burst coalescing
+        const uint32_t t0 = millis();
+        display_test_press(ui_tab_center_x(order[k]), ui_tab_center_y(), true);
+        ui_page_settle();
+        display_wait_idle(1000);
+        const uint32_t dt = millis() - t0;
+        display_test_press(ui_tab_center_x(order[k]), ui_tab_center_y(), false);
+        sum += dt;
+        if (dt > worst) worst = dt;
+        Serial.printf("TAPLAT tab %d -> page %d %u ms\n", order[k], ui_cur_page(), (unsigned)dt);
+    }
+    Serial.printf("TAPLAT avg %u ms worst %u ms\n", (unsigned)(sum / 12), (unsigned)worst);
+    Serial.println("TAPLAT_END");
+}
+
 // Demo data shaped like the design, for screenshots without a gateway.
 static void mock_data(DashData &d) {
     memset(&d, 0, sizeof(d));  // no DashData() temporary: it is several KB, too big for the loop stack
@@ -225,14 +255,14 @@ static void mock_data(DashData &d) {
     d.nprov = 3;
     QuotaProvider &c = d.prov[0];
     strcpy(c.provider, "codex"); strcpy(c.name, "Codex"); strcpy(c.plan, "plus");
-    strcpy(c.user, "brucevan@gmail.com");
+    strcpy(c.user, "alice@example.com");
     c.nwin = 2;
     strcpy(c.win[0].name, "5 hours"); c.win[0].remaining = 100; strcpy(c.win[0].reset, "10月19日 18:59");
     strcpy(c.win[1].name, "7 days"); c.win[1].remaining = 77; strcpy(c.win[1].reset, "10月22日 09:00");
     c.win[1].reset_at = time(nullptr) + 3 * 86400 + 21 * 3600;
     QuotaProvider &g = d.prov[1];
     strcpy(g.provider, "antigravity"); strcpy(g.name, "Antigravity"); strcpy(g.plan, "Google AI Pro");
-    strcpy(g.user, "fernando@gmail.com");
+    strcpy(g.user, "devteam@example.com");
     g.nwin = 4;
     const char *gn[4] = {"Gemini · 7 days", "Gemini · 5 hours", "Claude & GPT · 7 days", "Claude & GPT · 5 hours"};
     const float gr[4] = {89, 100, 42, 10};
@@ -256,10 +286,10 @@ static void mock_data(DashData &d) {
     d.today_calls = 51; d.today_tokens = 634000;
     struct R { const char *a, *an, *pid, *pv, *acct, *m, *stop; uint32_t in, out, cr, ms; uint16_t st; };
     const R rows[4] = {
-        {"claude", "Claude Code", "codex", "Codex", "br***@gmail.com", "codex/gpt-6-luna", "tool_calls", 1200, 600, 56000, 4800, 200},
+        {"claude", "Claude Code", "codex", "Codex", "al***@example.com", "codex/gpt-6-luna", "tool_calls", 1200, 600, 56000, 4800, 200},
         {"hermes", "Hermes Agent", "workbuddy", "WorkBuddy", "择梦舟", "workbuddy/deepseek-v4.1-flash", "stop", 2100, 800, 54800, 9100, 200},
-        {"codex", "Codex", "codex", "Codex", "br***@gmail.com", "codex/gpt-6.1-sol", "stop", 900, 300, 55400, 7300, 200},
-        {"grok", "Grok Build", "antigravity", "Antigravity", "fe***@gmail.com", "grok/grok-4.6", "stop", 40, 0, 0, 900, 429},
+        {"codex", "Codex", "codex", "Codex", "al***@example.com", "codex/gpt-6.1-sol", "stop", 900, 300, 55400, 7300, 200},
+        {"grok", "Grok Build", "antigravity", "Antigravity", "de***@example.com", "grok/grok-4.6", "stop", 40, 0, 0, 900, 429},
     };
     d.nrows = 4;
     for (int i = 0; i < 4; i++) {
@@ -320,6 +350,7 @@ static void handle_command(uint8_t c) {
         }
         if (c == 't') touch_dump();
         if (c == 'p') page_timing();
+        if (c == 'P') tap_latency();
         if (c == 'l') page_load();
         if (c == 'f') ui_focus_next();
         if (c == 'k') ui_poke();
@@ -369,6 +400,14 @@ static void poll_serial() {
     // CRC-checked frame, so a stray byte can never fire a debug action.
     char framed[64];
     while (usb_link_take_command(framed, sizeof(framed))) {
+        int tx, ty;
+        // "@x,y": a real tap through the LVGL input driver (demo recordings,
+        // scripted checks); anything else is a string of one-key commands
+        if (framed[0] == '@' && sscanf(framed + 1, "%d,%d", &tx, &ty) == 2) {
+            display_test_tap(tx, ty);
+            Serial.printf("[tap] %d,%d -> page %d\n", tx, ty, ui_cur_page());
+            continue;
+        }
         for (char *p = framed; *p; ++p) handle_command((uint8_t)*p);
     }
     // Limit each UI iteration's serial work so a data frame cannot starve touch.

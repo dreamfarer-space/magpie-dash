@@ -63,7 +63,7 @@ static inline void fmt_countdown(time_t when, char *buf, size_t n) {
     if (!when || now < 1700000000) return;
     long d = when - now;
     if (d <= 0) {
-        snprintf(buf, n, "即将重置");
+        snprintf(buf, n, "马上重置");
         return;
     }
     long days = d / 86400, hours = (d % 86400) / 3600;

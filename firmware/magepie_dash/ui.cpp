@@ -17,32 +17,44 @@
 #include "usb_link.h"
 #include "util.h"
 
+// Ark Pixel *monospaced*: ark10 / ark12 are 5 / 6 px per half-width cell (CJK
+// takes two cells), ark24 is the 12 px cut drawn at 2x. Every column below is a
+// multiple of the 6 px cell, which is what keeps the pages aligned.
 LV_FONT_DECLARE(ark10);
 LV_FONT_DECLARE(ark12);
 LV_FONT_DECLARE(ark24);
-LV_FONT_DECLARE(ark16);
 
 // Tap-driven page switch (coalesces bursts of taps); defined with the page
 // machinery further down. Programmatic switches use ui_goto().
 static void page_request(int page);
 
 // ------------------------------------------------------------------ palette
-#define C_BG 0x080C10
-#define C_CARD 0x15161D
-#define C_LINE 0x383749
-#define C_TEXT 0xEEEEF6
-#define C_MUTED 0x7E7C89
-#define C_DIM 0x2A2B38
-#define C_SHADOW 0x24252F
-#define C_FAINT 0x4A4A58
-#define C_ORANGE 0xDE7552
-#define C_GREEN 0x39DE83
-#define C_PURPLE 0x7B6DFF
-#define C_RED 0xE5484D
+// One dark terminal theme: panes are outlined, never filled, and colour is
+// reserved for state (green ok / amber busy / red error) and the agent brand.
+#define C_BG 0x0B0D10
+#define C_BAR 0x161A20     // top bar
+#define C_LINE 0x2C333C    // pane borders, rules
+#define C_DIM 0x1D232B     // unlit bar cells, inactive tabs, pressed rows
+#define C_TEXT 0xD8DEE6
+#define C_MUTED 0x7D8794
+#define C_FAINT 0x4B535E
+#define C_GREEN 0x4ADE80
+#define C_GREEN_DIM 0x2C8A50
+#define C_CYAN 0x5FC9E6
 #define C_AMBER 0xF2B33D
+#define C_RED 0xF0605A
+#define C_PURPLE 0xA78BFA  // magpie
+
+// screen chrome: a 18 px prompt bar on top, a 28 px tab bar at the bottom, the
+// pages live in between and only that band repaints on a page switch
+#define TOP_H 18
+#define TAB_Y 244
+#define TAB_H (LCD_H - TAB_Y)
+#define PAGE_Y TOP_H
+#define PAGE_H (TAB_Y - TOP_H)
 
 #define AG_ROWS AGENT_MAX
-#define RT_ROWS 12  // full request list: the detail page scrolls
+#define RT_ROWS 12  // every request the bridge sends; the log scrolls
 
 static lv_obj_t *pg[UI_PAGES];
 static int s_page = 0;
@@ -54,7 +66,6 @@ static char s_focus[16] = "";
 static uint32_t s_focus_ms = 0;
 #define FOCUS_HOLD_MS (10UL * 60UL * 1000UL)  // a pinned agent falls back after 10 min
 
-static void ui_clicks(lv_obj_t *o);
 static void link_panel_close();
 static void kb_close();
 static void link_panel_refresh();
@@ -62,40 +73,43 @@ static void close_overlays();
 
 // ------------------------------------------------------------------ refs
 static struct {
-    // home
-    lv_obj_t *date, *clock, *hm_handle;
+    // chrome
+    lv_obj_t *tb_prompt, *tb_cursor, *tb_right, *tab_box[6], *tab_lbl[6];
     // settings page
-    lv_obj_t *set_title, *set_val[6];
+    lv_obj_t *set_row[6], *set_val[6];
     // connection panel (settings -> 连接 magpie)
     lv_obj_t *lk, *lk_state, *lk_addr, *lk_hint, *lk_btn[2];
-    lv_obj_t *hm_accent, *hm_name, *hm_state, *hm_dot, *hm_pct, *hm_bar, *hm_qlbl, *hm_stats,
-        *hm_mag, *hm_tick;
+    // home
+    lv_obj_t *hm_name, *hm_sub, *hm_state, *hm_dot, *hm_qk[2], *hm_qbar[2], *hm_qpct[2],
+        *hm_today, *hm_30d, *hm_reset;
+    lv_obj_t *mg_state, *mg_calls, *mg_tok, *mg_costk, *mg_cost, *mg_sess, *mg_last, *mg_cap,
+        *mg_max, *mg_bars[SERIES_MAX], *mg_empty;
     // state pages (think / code / confirm)
-    lv_obj_t *st_agent[3], *st_star[3], *st_pip[3][3];
-    lv_obj_t *st_sess[3], *st_title[3], *st_sub[3], *st_l5[3], *st_l7[3], *st_p5[3], *st_p7[3],
-        *st_bar5[3], *st_bar7[3], *st_reset[3], *st_conn[3], *st_src[3];
+    lv_obj_t *st_title_l[3], *st_sess[3], *st_title[3], *st_cursor[3], *st_sub[3], *st_name[3],
+        *st_pip[3][3];
+    lv_obj_t *st_l5[3], *st_l7[3], *st_p5[3], *st_p7[3], *st_bar5[3], *st_bar7[3], *st_reset[3],
+        *st_conn[3], *st_conn_dot[3], *st_src[3];
     // agents
-    lv_obj_t *ag_list, *ag_row[AG_ROWS], *ag_icon[AG_ROWS], *ag_name[AG_ROWS],
-        *ag_detail[AG_ROWS], *ag_calls[AG_ROWS], *ag_live[AG_ROWS], *ag_state[AG_ROWS],
-        *ag_tab[UI_PAGES];
+    lv_obj_t *ag_count, *ag_list, *ag_row[AG_ROWS], *ag_icon[AG_ROWS], *ag_name[AG_ROWS],
+        *ag_detail[AG_ROWS], *ag_calls[AG_ROWS], *ag_live[AG_ROWS], *ag_state[AG_ROWS];
     char ag_id[AG_ROWS][16];
     // agent detail sheet (agents page)
-    lv_obj_t *sh, *sh_name, *sh_model, *sh_num[4], *sh_share, *sh_bar, *sh_last, *sh_follow;
+    lv_obj_t *sh, *sh_name, *sh_model, *sh_num[4], *sh_share, *sh_bar, *sh_last, *sh_follow, *sh_close;
     char sh_id[16];
     // quota
-    lv_obj_t *q_blk[QUOTA_MAX_PROV], *q_dot[QUOTA_MAX_PROV], *q_name[QUOTA_MAX_PROV], *q_plan[QUOTA_MAX_PROV],
-        *q_user[QUOTA_MAX_PROV], *q_reset[QUOTA_MAX_PROV], *q_empty;
-    lv_obj_t *q_ring[QUOTA_MAX_PROV][QUOTA_MAX_WIN], *q_pct[QUOTA_MAX_PROV][QUOTA_MAX_WIN],
-        *q_win[QUOTA_MAX_PROV][QUOTA_MAX_WIN], *q_word[QUOTA_MAX_PROV];
+    lv_obj_t *q_blk[QUOTA_MAX_PROV], *q_pane[QUOTA_MAX_PROV], *q_name[QUOTA_MAX_PROV],
+        *q_user[QUOTA_MAX_PROV], *q_empty;
+    lv_obj_t *q_key[QUOTA_MAX_PROV][QUOTA_MAX_WIN], *q_bar[QUOTA_MAX_PROV][QUOTA_MAX_WIN],
+        *q_pct[QUOTA_MAX_PROV][QUOTA_MAX_WIN], *q_rst[QUOTA_MAX_PROV][QUOTA_MAX_WIN];
     // usage
     lv_obj_t *u_tok, *u_in, *u_out, *u_cache, *u_calls, *u_err, *u_cost, *u_price, *u_hit, *u_hit2;
     lv_obj_t *u_bars[SERIES_MAX], *u_lbl[5], *u_ymax, *u_empty;
     // routes
-    lv_obj_t *r_sum[2], *r_empty[2];
+    lv_obj_t *r_sum[2], *r_empty[2], *r_count[2];
     lv_obj_t *r_row[2][RT_ROWS], *r_icon[2][RT_ROWS], *r_time[2][RT_ROWS], *r_agent[2][RT_ROWS],
         *r_model[2][RT_ROWS], *r_tag[2][RT_ROWS], *r_flow[2][RT_ROWS], *r_use[2][RT_ROWS],
         *r_scroll[2];
-    lv_obj_t *r_top_icon, *r_top_agent, *r_top_to;
+    lv_obj_t *r_top_icon, *r_top_agent, *r_top_to, *r_top_dot;
 } U;
 
 
@@ -134,143 +148,61 @@ static lv_obj_t *txt_clip(lv_obj_t *p, const char *s, int x, int y, int w, const
     return l;
 }
 
-static lv_obj_t *card(lv_obj_t *p, int x, int y, int w, int h) {
+// right-aligned column: the text ends at xr whatever its length
+static lv_obj_t *txt_r(lv_obj_t *p, const char *s, int xr, int y, int w, const lv_font_t *f,
+                       uint32_t col) {
+    lv_obj_t *l = txt_clip(p, s, xr - w, y, w, f, col);
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_RIGHT, 0);
+    return l;
+}
+
+static void fill(lv_obj_t *o, uint32_t col) {
+    lv_obj_set_style_bg_color(o, lv_color_hex(col), 0);
+    lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+}
+
+// Outlined pane: a 1 px box, no fill (cheaper to paint, and it reads as a
+// terminal window). Content goes inside as children, in pane coordinates.
+static lv_obj_t *pane(lv_obj_t *p, int x, int y, int w, int h, uint32_t border = C_LINE) {
     lv_obj_t *c = obj(p, x, y, w, h);
-    lv_obj_set_style_bg_color(c, lv_color_hex(C_CARD), 0);
-    lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(c, 3, 0);
     lv_obj_set_style_border_width(c, 1, 0);
-    lv_obj_set_style_border_color(c, lv_color_hex(C_LINE), 0);
+    lv_obj_set_style_border_color(c, lv_color_hex(border), 0);
     return c;
+}
+
+// Title cut into a pane's top border, "┌─ title ───┐" style. It sits on the
+// pane's parent (a child would be clipped by the pane), with a background
+// patch that hides the border behind it. right=true hangs it off the far end;
+// that one is aligned (not placed), so it stays flush when its text changes.
+static lv_obj_t *pane_title(lv_obj_t *pane, const char *s, uint32_t col, bool right = false) {
+    lv_obj_t *p = lv_obj_get_parent(pane);
+    lv_obj_update_layout(pane);  // a fresh object reports 0,0 until laid out
+    const int x = lv_obj_get_x(pane), y = lv_obj_get_y(pane) - 6;
+    lv_obj_t *l = txt(p, s, x + 8, y, &ark12, col);
+    fill(l, C_BG);
+    lv_obj_set_style_pad_hor(l, 3, 0);
+    if (right)
+        lv_obj_align(l, LV_ALIGN_TOP_RIGHT, -(lv_obj_get_width(p) - x - lv_obj_get_width(pane) + 8), y);
+    return l;
 }
 
 static lv_obj_t *dot(lv_obj_t *p, int x, int y, int s, uint32_t col) {
     lv_obj_t *d = obj(p, x, y, s, s);
-    lv_obj_set_style_bg_color(d, lv_color_hex(col), 0);
-    lv_obj_set_style_bg_opa(d, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(d, 0, 0);
+    fill(d, col);
     return d;
-}
-
-static lv_obj_t *img(lv_obj_t *p, const void *src, int x, int y) {
-    lv_obj_t *i = lv_img_create(p);
-    lv_img_set_src(i, src);
-    lv_obj_set_pos(i, x, y);
-    return i;
-}
-
-// small bordered tag ("codex/gpt-6-luna", "提示词建议"); sized by its text
-static lv_obj_t *chip(lv_obj_t *p, const char *s, uint32_t border, uint32_t col) {
-    lv_obj_t *l = txt(p, s, 0, 0, &ark12, col);
-    lv_obj_set_style_bg_color(l, lv_color_hex(C_BG), 0);
-    lv_obj_set_style_bg_opa(l, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(l, 1, 0);
-    lv_obj_set_style_border_color(l, lv_color_hex(border), 0);
-    lv_obj_set_style_radius(l, 2, 0);
-    lv_obj_set_style_pad_hor(l, 4, 0);
-    lv_obj_set_style_pad_ver(l, 1, 0);
-    return l;
-}
-
-// row container that lays its children out left to right, vertically centred
-static lv_obj_t *hrow(lv_obj_t *p, int x, int y, int w, int h, int gap, lv_flex_align_t main) {
-    lv_obj_t *r = obj(p, x, y, w, h);
-    lv_obj_set_flex_flow(r, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(r, main, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(r, gap, 0);
-    lv_obj_add_flag(r, LV_OBJ_FLAG_EVENT_BUBBLE);
-    return r;
-}
-
-// segmented progress bar; segments are row-flexed children
-static lv_obj_t *segbar(lv_obj_t *p, int x, int y, int w, int h, int n, uint32_t on) {
-    lv_obj_t *c = obj(p, x, y, w, h);
-    lv_obj_set_flex_flow(c, LV_FLEX_FLOW_ROW);
-    lv_obj_set_style_pad_column(c, 2, 0);
-    int segw = (w - (n - 1) * 2) / n;
-    if (segw < 1) segw = 1;
-    for (int i = 0; i < n; i++) {
-        lv_obj_t *s = obj(c, 0, 0, segw, h);
-        lv_obj_set_style_bg_color(s, lv_color_hex(C_DIM), 0);
-        lv_obj_set_style_bg_opa(s, LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(s, 1, 0);
-        lv_obj_add_flag(s, LV_OBJ_FLAG_EVENT_BUBBLE);
-    }
-    lv_obj_set_user_data(c, (void *)(uintptr_t)on);
-    return c;
-}
-
-static void segbar_set(lv_obj_t *bar, float pct, uint32_t on) {
-    if (!bar) return;
-    uint32_t n = lv_obj_get_child_cnt(bar);
-    int lit = (int)(pct * n / 100.0f + 0.5f);
-    if (lit < 0) lit = 0;
-    if (lit > (int)n) lit = (int)n;
-    for (uint32_t i = 0; i < n; i++) {
-        lv_obj_t *s = lv_obj_get_child(bar, i);
-        // Only write when the segment actually changes: an unconditional
-        // set_style invalidates the segment (and repaints the bar) on every
-        // 15 s data refresh even when nothing moved.
-        const uint32_t col = i < (uint32_t)lit ? on : C_DIM;
-        if (lv_color_to32(lv_obj_get_style_bg_color(s, 0)) != lv_color_to32(lv_color_hex(col)))
-            lv_obj_set_style_bg_color(s, lv_color_hex(col), 0);
-    }
-}
-
-static void segbar_set(lv_obj_t *bar, float pct) {
-    if (bar) segbar_set(bar, pct, (uint32_t)(uintptr_t)lv_obj_get_user_data(bar));
-}
-
-static lv_obj_t *ring(lv_obj_t *p, int x, int y, int size, uint32_t col) {
-    lv_obj_t *a = lv_arc_create(p);
-    lv_obj_set_size(a, size, size);
-    lv_obj_set_pos(a, x, y);
-    lv_arc_set_rotation(a, 270);
-    lv_arc_set_bg_angles(a, 0, 360);
-    lv_arc_set_range(a, 0, 100);
-    lv_arc_set_value(a, 0);
-    lv_obj_remove_style(a, NULL, LV_PART_KNOB);
-    lv_obj_clear_flag(a, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_arc_width(a, 4, LV_PART_MAIN);
-    lv_obj_set_style_arc_width(a, 4, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_rounded(a, false, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_color(a, lv_color_hex(C_DIM), LV_PART_MAIN);
-    lv_obj_set_style_arc_color(a, lv_color_hex(col), LV_PART_INDICATOR);
-    lv_obj_set_style_bg_opa(a, LV_OPA_TRANSP, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(a, 0, LV_PART_MAIN);
-    return a;
 }
 
 static void hline(lv_obj_t *p, int x, int y, int w, uint32_t col) {
     lv_obj_t *l = obj(p, x, y, w, 1);
-    lv_obj_set_style_bg_color(l, lv_color_hex(col), 0);
-    lv_obj_set_style_bg_opa(l, LV_OPA_COVER, 0);
+    fill(l, col);
 }
 
-// Dashed rule between card sections. ONE lv_line whose points form the dashes:
-// a 2x2 object per dot meant ~1000 extra objects across the nine pages, which
-// ate the heap and slowed every redraw down.
-static void dline(lv_obj_t *p, int x, int y, int w) {
-    int n = (w / 4 + 1) * 2;
-    lv_point_t *pts = (lv_point_t *)lv_mem_alloc(sizeof(lv_point_t) * n);
-    if (!pts) return;
-    int k = 0;
-    for (int i = 0; i + 3 <= w && k + 1 < n; i += 4) {
-        pts[k].x = (lv_coord_t)(x + i);
-        pts[k].y = (lv_coord_t)y;
-        pts[k + 1].x = (lv_coord_t)(x + i + 2);
-        pts[k + 1].y = (lv_coord_t)y;
-        k += 2;
-    }
-    if (k < 2) {
-        lv_mem_free(pts);
-        return;
-    }
-    lv_obj_t *l = lv_line_create(p);
-    lv_line_set_points(l, pts, k);  // lv_line keeps the pointer, so it must be owned
-    lv_obj_set_style_line_width(l, 1, 0);
-    lv_obj_set_style_line_color(l, lv_color_hex(C_LINE), 0);
-}
+// Rule between pane sections: one 1 px rectangle. It used to be an lv_line
+// through ~110 collinear points (meant as dashes, but a polyline joins them, so
+// it drew solid anyway); every segment was a separate line draw with its own
+// mask, and with one rule per log row that was the slowest thing on the route
+// page.
+static void dline(lv_obj_t *p, int x, int y, int w) { hline(p, x, y, w, C_LINE); }
 
 static void show(lv_obj_t *o, bool on) {
     if (!o) return;
@@ -295,19 +227,49 @@ static void set_txtf(lv_obj_t *o, const char *fmt, ...) {
     set_txt(o, buf);
 }
 
-// ark16 is the Latin-only 16px cut; anything with CJK drops to ark12
-static void set_txt_fit(lv_obj_t *o, const char *s) {
-    if (!o) return;
-    bool cjk = false;
-    for (const char *c = s; *c && !cjk; c++) cjk = (unsigned char)*c >= 0x80;
-    lv_obj_set_style_text_font(o, cjk ? &ark12 : &ark16, 0);
-    set_txt(o, s);
-}
-
 static void set_color(lv_obj_t *o, uint32_t col) {
     if (!o) return;
     if (lv_color_to32(lv_obj_get_style_text_color(o, 0)) == lv_color_to32(lv_color_hex(col))) return;
     lv_obj_set_style_text_color(o, lv_color_hex(col), 0);
+}
+
+static void set_bg(lv_obj_t *o, uint32_t col) {
+    if (!o) return;
+    if (lv_color_to32(lv_obj_get_style_bg_color(o, 0)) == lv_color_to32(lv_color_hex(col))) return;
+    lv_obj_set_style_bg_color(o, lv_color_hex(col), 0);
+}
+
+// ------------------------------------------------------------------ bars
+// A btop-style meter: one recoloured label of "■" cells (12 px each, with a
+// gap built into the glyph). One object instead of one per segment, and the
+// label only re-renders when the lit count or colour really changes.
+static lv_obj_t *tbar(lv_obj_t *p, int x, int y, int cells) {
+    lv_obj_t *l = txt(p, "", x, y, &ark12, C_DIM);
+    lv_label_set_recolor(l, true);
+    lv_obj_set_user_data(l, (void *)(intptr_t)cells);
+    return l;
+}
+
+static void tbar_set(lv_obj_t *l, float pct, uint32_t col) {
+    if (!l) return;
+    const int cells = (int)(intptr_t)lv_obj_get_user_data(l);
+    int lit = (int)(pct * cells / 100.0f + 0.5f);
+    if (pct > 0 && lit == 0) lit = 1;  // anything left at all keeps one cell lit
+    if (lit < 0) lit = 0;
+    if (lit > cells) lit = cells;
+    char b[32 * 3 + 40];
+    int n = 0;
+    if (lit) {
+        n += snprintf(b + n, sizeof(b) - n, "#%06X ", (unsigned)col);
+        for (int i = 0; i < lit; i++) n += snprintf(b + n, sizeof(b) - n, "■");
+        n += snprintf(b + n, sizeof(b) - n, "#");
+    }
+    if (cells - lit) {
+        n += snprintf(b + n, sizeof(b) - n, "#%06X ", (unsigned)C_DIM);
+        for (int i = lit; i < cells; i++) n += snprintf(b + n, sizeof(b) - n, "■");
+        n += snprintf(b + n, sizeof(b) - n, "#");
+    }
+    set_txt(l, b);
 }
 
 // ------------------------------------------------------------------ agents
@@ -341,21 +303,19 @@ static void logo_set(lv_obj_t *i, const lv_img_dsc_t *src) {
 }
 
 // ------------------------------------------------------------------ avatars
-// An agent's avatar is its logo as is, straight on the card: no tile, no
+// An agent's avatar is its logo as is, straight on the pane: no tile, no
 // ring, so the brand colours stay true. Tapping it "pokes" the agent: it hops
 // and says one of its lines in a speech bubble (poke it five times quickly and
 // it complains). What it is doing shows as three typing dots (thinking / at
 // work), a ">_" badge (writing code) or an amber "!" (waiting for you).
-//
-// Nothing here animates continuously: an endless lv_anim around an 88 px
-// alpha image kept LVGL busy 40-70% of the time and made touch sluggish. The
-// dots are three 6 px squares recoloured by one slow timer.
 enum { AV_IDLE, AV_THINK, AV_CODE, AV_CONFIRM };
 
 struct Avatar {
-    lv_obj_t *box, *logo, *badge, *badge_lbl, *bubble, *bubble_lbl, *dots[3];
+    lv_obj_t *box, *logo, *badge, *badge_lbl, *bubble, *bubble_lbl, *tail, *dots[3];
     const AgentSkin *sk;
-    bool big;  // 88 px logo (state pages) or 56 px
+    bool big;     // 88 px logo (state pages) or 56 px
+    bool below;   // bubble hangs under the avatar (tail points up)
+    int cx;       // avatar centre, parent coordinates
     int mode;
     uint8_t pokes, say;
     uint32_t poke_ms;
@@ -364,7 +324,12 @@ struct Avatar {
 
 static Avatar s_av_home, s_av_state[3], s_av_sheet;
 
-static void anim_translate_y(void *o, int32_t v) { lv_obj_set_style_translate_y((lv_obj_t *)o, v, 0); }
+// The breathing loop asks for the same 0..-3 px offsets ~60 times a second;
+// writing an unchanged style still invalidates the avatar, so skip those.
+static void anim_translate_y(void *o, int32_t v) {
+    lv_obj_t *obj = (lv_obj_t *)o;
+    if (lv_obj_get_style_translate_y(obj, 0) != v) lv_obj_set_style_translate_y(obj, v, 0);
+}
 static void anim_nop(void *, int32_t) {}
 static void anim_hide(lv_anim_t *a) { lv_obj_add_flag((lv_obj_t *)a->var, LV_OBJ_FLAG_HIDDEN); }
 
@@ -425,6 +390,16 @@ static void avatars_sync_motion(bool busy) {
 static void avatar_say(Avatar &a, const char *line, uint32_t ms) {
     if (!a.bubble) return;
     lv_label_set_text(a.bubble_lbl, line);
+    // Keep the whole bubble inside its pane: a long line centred on an avatar
+    // near the edge used to be cut off. The tail still points at the avatar.
+    lv_obj_t *p = lv_obj_get_parent(a.bubble);
+    lv_obj_update_layout(a.bubble);
+    const int w = lv_obj_get_width(a.bubble), pw = lv_obj_get_width(p);
+    int x = a.cx - w / 2;
+    if (x > pw - w - 4) x = pw - w - 4;
+    if (x < 4) x = 4;
+    lv_obj_set_x(a.bubble, x);
+    lv_obj_set_x(a.tail, a.cx - x - 4 - 6);  // child x starts after the 6 px padding
     lv_obj_clear_flag(a.bubble, LV_OBJ_FLAG_HIDDEN);
     lv_anim_del(a.bubble, anim_nop);
     lv_anim_t an;  // hide again after a while
@@ -453,7 +428,7 @@ static void avatar_poke_cb(lv_event_t *e) { avatar_poke(*(Avatar *)lv_event_get_
 static void avatar_badge(Avatar &a, const char *s, uint32_t col) {
     show(a.badge, s != nullptr);
     if (!s) return;
-    lv_obj_set_style_bg_color(a.badge, lv_color_hex(col), 0);
+    set_bg(a.badge, col);
     set_txt(a.badge_lbl, s);
 }
 
@@ -462,7 +437,7 @@ static void avatar_mode(Avatar &a, int mode) {
     a.mode = mode;
     for (int k = 0; k < 3; k++) show(a.dots[k], mode == AV_THINK);
     if (mode == AV_CODE)
-        avatar_badge(a, ">_", C_PURPLE);
+        avatar_badge(a, ">_", C_CYAN);
     else if (mode == AV_CONFIRM)
         avatar_badge(a, "!", C_AMBER);
     else
@@ -473,10 +448,11 @@ static void avatar_mode(Avatar &a, int mode) {
 static void avatar_step(Avatar &a, int phase) {
     if (!a.box || a.mode != AV_THINK || !lv_obj_is_visible(a.box)) return;
     const uint32_t on = a.sk ? a.sk->accent : C_TEXT;
-    for (int k = 0; k < 3; k++) lv_obj_set_style_bg_color(a.dots[k], lv_color_hex(k == phase ? on : C_FAINT), 0);
+    for (int k = 0; k < 3; k++) set_bg(a.dots[k], k == phase ? on : C_FAINT);
 }
 
-// logo centred on cx/cy; the speech bubble floats at bubble_y
+// logo centred on cx/cy; the speech bubble's top edge sits at bubble_y (below
+// the avatar when bubble_y > cy)
 static void avatar_create(Avatar &a, lv_obj_t *p, int cx, int cy, bool big, int bubble_y) {
     const int sz = big ? 88 : 56, bs = sz + 8;
     a.box = obj(p, cx - bs / 2, cy - bs / 2, bs, bs);
@@ -487,33 +463,29 @@ static void avatar_create(Avatar &a, lv_obj_t *p, int cx, int cy, bool big, int 
     lv_obj_align(a.logo, LV_ALIGN_CENTER, 0, 0);
 
     // corner badge: ">_" while coding, "!" while waiting
-    a.badge = obj(a.box, bs - 18, -8, 26, 18);
-    lv_obj_set_style_radius(a.badge, 9, 0);
-    lv_obj_set_style_bg_opa(a.badge, LV_OPA_COVER, 0);
+    a.badge = obj(a.box, bs - 18, -6, 24, 16);
+    fill(a.badge, C_CYAN);
     a.badge_lbl = txt(a.badge, "", 0, 0, &ark12, C_BG);
     lv_obj_align(a.badge_lbl, LV_ALIGN_CENTER, 0, 0);
     show(a.badge, false);
 
     for (int k = 0; k < 3; k++) {
-        a.dots[k] = dot(p, cx - 13 + k * 10, cy + bs / 2 + 6, 6, C_FAINT);
-        lv_obj_set_style_radius(a.dots[k], 3, 0);
+        a.dots[k] = dot(p, cx - 13 + k * 10, cy + bs / 2 + 4, 6, C_FAINT);
         show(a.dots[k], false);
     }
 
-    a.bubble = obj(p, 0, 0, LV_SIZE_CONTENT, 22);
-    lv_obj_update_layout(p);  // a fresh parent reports width 0 until laid out
-    lv_obj_align(a.bubble, LV_ALIGN_TOP_MID, cx - lv_obj_get_content_width(p) / 2, bubble_y);
-    lv_obj_set_style_bg_color(a.bubble, lv_color_hex(C_TEXT), 0);
-    lv_obj_set_style_bg_opa(a.bubble, LV_OPA_COVER, 0);
-    lv_obj_set_style_radius(a.bubble, 6, 0);
-    lv_obj_set_style_pad_hor(a.bubble, 9, 0);
+    a.below = bubble_y > cy;
+    a.cx = cx;
+    a.bubble = obj(p, 0, bubble_y, LV_SIZE_CONTENT, 20);
+    fill(a.bubble, C_TEXT);
+    lv_obj_set_style_pad_hor(a.bubble, 6, 0);
     lv_obj_add_flag(a.bubble, LV_OBJ_FLAG_OVERFLOW_VISIBLE);
     a.bubble_lbl = txt(a.bubble, "", 0, 0, &ark12, C_BG);
     lv_obj_align(a.bubble_lbl, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_obj_t *tail = obj(a.bubble, 0, 0, 8, 5);  // points down at the avatar
-    lv_obj_align(tail, LV_ALIGN_BOTTOM_MID, 0, 5);
-    lv_obj_set_style_bg_color(tail, lv_color_hex(C_TEXT), 0);
-    lv_obj_set_style_bg_opa(tail, LV_OPA_COVER, 0);
+    // tail points at the avatar; x is set per line in avatar_say()
+    a.tail = obj(a.bubble, 0, a.below ? -4 : 20, 8, 4);
+    lv_obj_add_flag(a.tail, LV_OBJ_FLAG_FLOATING);  // must not widen the bubble
+    fill(a.tail, C_TEXT);
     show(a.bubble, false);
 
     a.big = big;
@@ -585,128 +557,185 @@ static uint32_t remain_col(float rem) {
 }
 
 // ------------------------------------------------------------------ chrome
-static lv_obj_t *make_page() {
-    lv_obj_t *p = obj(lv_scr_act(), 0, 0, LCD_W, LCD_H);
-    lv_obj_set_style_bg_color(p, lv_color_hex(C_BG), 0);
-    lv_obj_set_style_bg_opa(p, LV_OPA_COVER, 0);
-    return p;
-}
+// The prompt bar and the tab bar are built once and shared by every page, so a
+// page switch repaints only the band between them (480x226 instead of the
+// full 480x272) and the navigation never moves from page to page.
+static const char *const PAGE_PATH[UI_PAGES] = {
+    "~", "~/agent/thinking", "~/agent/coding", "~/agent/confirm", "~/agents",
+    "~/quota", "~/usage", "~/routes", "~/routes/log", "~/config",
+};
+static const int PAGE_TAB[UI_PAGES] = {0, 0, 0, 0, 1, 2, 3, 4, 4, 5};
+static const int TAB_PAGE[6] = {PG_HOME, PG_AGENTS, PG_QUOTA, PG_USAGE, PG_ROUTES, PG_SETTINGS};
+static const int TAB_W = LCD_W / 6;
 
-static void home_btn(lv_obj_t *p) {
-    lv_obj_t *b = obj(p, 4, 4, 36, 32);  // a little larger than the icon: easier to hit
-    lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_ext_click_area(b, 4);
-    lv_obj_add_event_cb(b, [](lv_event_t *e) { page_request(PG_HOME); }, LV_EVENT_CLICKED, NULL);
-    img(b, &home_icon, 2, 2);
+// Tab geometry lives here only: the hit-test regression asks for the centres, so
+// a layout change can never leave the test tapping yesterday's coordinates.
+int ui_tab_center_x(int index) { return index * TAB_W + TAB_W / 2; }
+int ui_tab_center_y() { return TAB_Y + TAB_H / 2; }
+
+static lv_obj_t *make_page() {
+    lv_obj_t *p = obj(lv_scr_act(), 0, PAGE_Y, LCD_W, PAGE_H);
+    fill(p, C_BG);
+    return p;
 }
 
 static void tab_cb(lv_event_t *e) {
     page_request((int)(intptr_t)lv_event_get_user_data(e));
 }
 
-// header of pages 4..8: home, magpie mark, then Agent / 额度 / 用量 / 路由
-// spread over the rest of the width like the design (and wide enough to hit)
-// Tab geometry lives here only: the hit-test regression asks for the centres, so
-// a layout change can never leave the test tapping yesterday's coordinates.
-static const int TAB_X0 = 82, TAB_W = 76, TAB_GAP = 4;
-int ui_tab_center_x(int index) { return TAB_X0 + index * (TAB_W + TAB_GAP) + TAB_W / 2; }
-
-static void tabs(lv_obj_t *p, int active, int page_id) {
-    static const char *names[5] = {"Agent", "额度", "用量", "路由", "设置"};
-    static const int pages[5] = {PG_AGENTS, PG_QUOTA, PG_USAGE, PG_ROUTES, PG_SETTINGS};
-    lv_obj_t *bm = img(p, &bird, 46, 10);
-    lv_img_set_pivot(bm, 0, 0);
-    lv_img_set_zoom(bm, 72);  // 98x76 -> 27x21 header mark
-    const int x0 = TAB_X0, w = TAB_W, gap = TAB_GAP;
-    for (int i = 0; i < 5; i++) {
-        lv_obj_t *b = obj(p, x0 + i * (w + gap), 6, w, 28);
-        lv_obj_set_style_radius(b, 3, 0);
-        lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
-        // 2 px of slack around the pill; the gap is 6 px, so neighbours cannot
-        // steal it while taps a couple of pixels off still land.
-        lv_obj_set_ext_click_area(b, 2);
-        lv_obj_set_style_bg_color(b, lv_color_hex(C_PURPLE), 0);
-        lv_obj_set_style_bg_opa(b, i == active ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-        // visible feedback on press, so a tap never feels ignored
-        lv_obj_set_style_bg_color(b, lv_color_hex(C_DIM), LV_STATE_PRESSED);
-        lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_STATE_PRESSED);
-        lv_obj_t *l = txt(b, names[i], 0, 0, &ark12, i == active ? C_TEXT : C_MUTED);
-        lv_obj_center(l);
-        if (i == 0) U.ag_tab[page_id] = l;  // "Agent N" carries a live count
-        lv_obj_add_event_cb(b, tab_cb, LV_EVENT_CLICKED, (void *)(intptr_t)pages[i]);
+static void chrome_prompt() {
+    if (!U.tb_prompt) return;
+    char b[80];
+    snprintf(b, sizeof(b), "#%06X %s@magpie#:#%06X %s#$", (unsigned)C_GREEN, g_cfg.handle,
+             (unsigned)C_CYAN, PAGE_PATH[s_page]);
+    if (strcmp(lv_label_get_text(U.tb_prompt), b)) {
+        lv_label_set_text(U.tb_prompt, b);
+        lv_obj_align_to(U.tb_cursor, U.tb_prompt, LV_ALIGN_OUT_RIGHT_MID, 3, 0);
     }
-    hline(p, 0, 40, LCD_W, C_DIM);
+}
+
+static void chrome_tabs() {
+    const int on = PAGE_TAB[s_page];
+    for (int i = 0; i < 6; i++) {
+        set_bg(U.tab_box[i], i == on ? C_GREEN : C_DIM);
+        set_color(U.tab_lbl[i], i == on ? C_BG : C_MUTED);
+    }
+}
+
+static void build_chrome() {
+    lv_obj_t *scr = lv_scr_act();
+    // ---- prompt bar: user@magpie:~/page$ _              ● usb  10/20 周二 22:47
+    lv_obj_t *top = obj(scr, 0, 0, LCD_W, TOP_H);
+    fill(top, C_BAR);
+    // Touch-only gestures (this panel has no usable BOOT button - GPIO0 is the
+    // LCD TE line): long-press the bar for the quick touch calibration.
+    lv_obj_add_flag(top, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(
+        top,
+        [](lv_event_t *e) {
+            Serial.println("[ui] top bar long-press -> quick calibration");
+            ui_quickcal_begin();
+        },
+        LV_EVENT_LONG_PRESSED, NULL);
+    U.tb_prompt = txt(top, "", 6, 3, &ark12, C_TEXT);
+    lv_label_set_recolor(U.tb_prompt, true);
+    // tapping the prompt (it carries the handle) is the second way into settings
+    lv_obj_add_flag(U.tb_prompt, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(U.tb_prompt, 4);
+    lv_obj_add_event_cb(U.tb_prompt, [](lv_event_t *e) { page_request(PG_SETTINGS); },
+                        LV_EVENT_CLICKED, NULL);
+    U.tb_cursor = obj(top, 0, 0, 6, 11);
+    fill(U.tb_cursor, C_TEXT);
+    U.tb_right = txt_r(top, "", LCD_W - 6, 3, 220, &ark12, C_MUTED);
+    lv_label_set_recolor(U.tb_right, true);
+
+    // ---- tab bar, htop style: "1[主页 ] 2[Agent] ..." with the page lit
+    static const char *names[6] = {"主页", "Agent", "额度", "用量", "路由", "设置"};
+    lv_obj_t *bar = obj(scr, 0, TAB_Y, LCD_W, TAB_H);
+    fill(bar, C_BG);
+    hline(bar, 0, 0, LCD_W, C_LINE);
+    for (int i = 0; i < 6; i++) {
+        lv_obj_t *b = obj(bar, i * TAB_W, 1, TAB_W, TAB_H - 1);
+        char k[2] = {(char)('1' + i), 0};
+        txt(b, k, 6, 8, &ark12, C_TEXT);
+        // The label box is the button; 8 px of slack reaches over the key digit
+        // and the bar edges while leaving a 4 px dead gap between neighbours.
+        lv_obj_t *box = U.tab_box[i] = obj(b, 16, 4, TAB_W - 20, TAB_H - 9);
+        fill(box, C_DIM);
+        lv_obj_add_flag(box, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_ext_click_area(box, 8);
+        // Tabs switch on touch-down, not on release: a finger rests 80-150 ms
+        // before it lifts, and waiting for that was most of the felt latency.
+        // Safe here because the tab bar never scrolls, so a press is a tap.
+        lv_obj_add_event_cb(box, tab_cb, LV_EVENT_PRESSED, (void *)(intptr_t)TAB_PAGE[i]);
+        U.tab_lbl[i] = txt(box, names[i], 0, 0, &ark12, C_MUTED);
+        lv_obj_center(U.tab_lbl[i]);
+    }
+}
+
+// key / value line: muted key at x, value right-aligned at xr
+static lv_obj_t *kv(lv_obj_t *p, const char *k, int x, int xr, int y, int vw) {
+    txt(p, k, x, y, &ark12, C_MUTED);
+    return txt_r(p, "--", xr, y, vw, &ark12, C_TEXT);
+}
+
+// hand-drawn bar chart (lv_chart drew outside its own area on this panel)
+static void bars_create(lv_obj_t *p, lv_obj_t **bars, int x0, int base) {
+    for (int i = 0; i < SERIES_MAX; i++) {
+        bars[i] = obj(p, x0, base - 2, 4, 2);
+        fill(bars[i], C_GREEN_DIM);
+        show(bars[i], false);
+    }
+}
+
+// lays the series out over [x0, x0+w), bars grow up from base; returns the
+// slot width (0 when there is nothing to draw)
+static int bars_fill(lv_obj_t **bars, const DashData &d, int x0, int w, int base, int h) {
+    const int n = d.nseries;
+    float mx = 0;
+    for (int i = 0; i < n; i++)
+        if (d.series[i].tokens > mx) mx = d.series[i].tokens;
+    const int slot = n ? w / n : w;
+    const int bw = slot > 4 ? slot - 2 : (slot > 1 ? slot - 1 : 1);
+    for (int i = 0; i < SERIES_MAX; i++) {
+        // Empty buckets must not draw a 2 px stub: a row of stubs reads as a
+        // broken dashed baseline instead of "no usage".
+        const bool on = i < n && mx > 0 && d.series[i].tokens > 0;
+        show(bars[i], on);
+        if (!on) continue;
+        int bh = (int)(d.series[i].tokens / mx * h + 0.5f);
+        if (bh < 2) bh = 2;
+        lv_obj_set_pos(bars[i], x0 + i * slot, base - bh);
+        lv_obj_set_size(bars[i], bw, bh);
+        set_bg(bars[i], i == n - 1 ? C_GREEN : C_GREEN_DIM);  // the latest bucket stands out
+    }
+    return mx > 0 ? slot : 0;
 }
 
 // ------------------------------------------------------------------ page 1
 static void build_home() {
     lv_obj_t *p = pg[PG_HOME] = make_page();
 
-    U.hm_handle = txt(p, "@Dreamfarer", 10, 7, &ark12, C_MUTED);
-    lv_obj_set_width(U.hm_handle, 190);
-    lv_label_set_long_mode(U.hm_handle, LV_LABEL_LONG_DOT);
-    // tapping the name is the second way into settings (the tab bar is the first)
-    lv_obj_add_flag(U.hm_handle, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_ext_click_area(U.hm_handle, 6);
-    lv_obj_add_event_cb(U.hm_handle, [](lv_event_t *e) { page_request(PG_SETTINGS); },
-                        LV_EVENT_CLICKED, NULL);
-    U.date = txt(p, "--/-- ---", 0, 9, &ark12, C_MUTED);
-    lv_obj_align(U.date, LV_ALIGN_TOP_RIGHT, -86, 9);
-    U.clock = txt(p, "-- --", 0, 2, &ark24, C_TEXT);
-    lv_obj_align(U.clock, LV_ALIGN_TOP_RIGHT, -10, 2);
-
-    // Touch-only gestures (this panel has no usable BOOT button - GPIO0 is the
-    // LCD TE line). Long-press the header strip to open the calibration screen;
-    // it carries its own "RESET WIFI" button, so no secret long-press is needed
-    // for networking.
-    lv_obj_t *hdr = obj(p, 0, 0, LCD_W, 28);
-    lv_obj_add_flag(hdr, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_add_event_cb(
-        hdr,
-        [](lv_event_t *e) {
-            Serial.println("[ui] header long-press -> quick calibration");
-            ui_quickcal_begin();
-        },
-        LV_EVENT_LONG_PRESSED, NULL);
-
-    // ---- left card: the agent at work, as its avatar (tap it to poke it,
-    // tap anywhere else on the card for its status pages)
-    lv_obj_t *cl = card(p, 8, 34, 228, 230);
-    U.hm_accent = obj(cl, 0, 0, 228, 3);
-    lv_obj_set_style_bg_color(U.hm_accent, lv_color_hex(C_ORANGE), 0);
-    lv_obj_set_style_bg_opa(U.hm_accent, LV_OPA_COVER, 0);
-    avatar_create(s_av_home, cl, 114, 64, false, 8);
-    U.hm_name = txt(cl, "Claude Code", 0, 0, &ark16, C_TEXT);
-    lv_obj_align(U.hm_name, LV_ALIGN_TOP_MID, 0, 122);
-    lv_obj_t *st = hrow(cl, 0, 143, 226, 16, 6, LV_FLEX_ALIGN_CENTER);
-    U.hm_dot = dot(st, 0, 0, 6, C_ORANGE);
-    lv_obj_set_style_radius(U.hm_dot, 3, 0);
-    U.hm_state = txt(st, "等待网关", 0, 0, &ark12, C_MUTED);
-    dline(cl, 10, 166, 206);
-    U.hm_qlbl = txt(cl, "5h", 10, 176, &ark12, C_MUTED);
-    U.hm_bar = segbar(cl, 38, 176, 140, 12, 12, C_GREEN);
-    U.hm_pct = txt(cl, "--", 0, 0, &ark12, C_GREEN);
-    lv_obj_align(U.hm_pct, LV_ALIGN_TOP_RIGHT, -10, 176);
-    U.hm_stats = txt_clip(cl, "", 10, 200, 206, &ark12, C_MUTED);
-    ui_clicks(cl);
+    // ---- left pane: the agent at work, as its avatar (tap it to poke it,
+    // tap anywhere else on the pane for its status pages)
+    lv_obj_t *cl = pane(p, 6, 8, 230, 210);
+    pane_title(cl, "agent", C_MUTED);
+    avatar_create(s_av_home, cl, 42, 44, false, 88);
+    U.hm_name = txt_clip(cl, "--", 84, 14, 138, &ark12, C_TEXT);
+    U.hm_sub = txt_clip(cl, "", 84, 30, 138, &ark12, C_MUTED);
+    U.hm_dot = dot(cl, 84, 52, 6, C_FAINT);
+    U.hm_state = txt_clip(cl, "等待网关", 96, 48, 126, &ark12, C_MUTED);
+    dline(cl, 8, 104, 214);
+    for (int k = 0; k < 2; k++) {
+        U.hm_qk[k] = txt(cl, k ? "7d" : "5h", 8, 114 + k * 18, &ark12, C_MUTED);
+        U.hm_qbar[k] = tbar(cl, 42, 114 + k * 18, 12);
+        U.hm_qpct[k] = txt_r(cl, "--", 222, 114 + k * 18, 36, &ark12, C_TEXT);
+    }
+    U.hm_today = kv(cl, "今天调用", 8, 222, 158, 100);
+    U.hm_30d = kv(cl, "30 天调用", 8, 222, 174, 100);
+    U.hm_reset = txt_clip(cl, "", 8, 190, 214, &ark12, C_FAINT);
+    lv_obj_add_flag(cl, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_border_color(cl, lv_color_hex(C_MUTED), LV_STATE_PRESSED);
     lv_obj_add_event_cb(cl, [](lv_event_t *e) { page_request(PG_STATE_THINK); }, LV_EVENT_CLICKED, NULL);
 
-    // ---- right card: magpie
-    lv_obj_t *cr = card(p, 244, 34, 228, 230);
-    lv_obj_t *accent2 = obj(cr, 0, 0, 228, 3);
-    lv_obj_set_style_bg_color(accent2, lv_color_hex(C_PURPLE), 0);
-    lv_obj_set_style_bg_opa(accent2, LV_OPA_COVER, 0);
-    img(cr, &bird, 65, 40);
-    lv_obj_t *t2 = txt(cr, "magpie", 0, 0, &ark16, C_TEXT);
-    lv_obj_align(t2, LV_ALIGN_TOP_MID, 0, 146);
-    lv_obj_t *mr = hrow(cr, 0, 168, 226, 16, 6, LV_FLEX_ALIGN_CENTER);
-    dot(mr, 0, 0, 6, C_GREEN);
-    U.hm_mag = txt(mr, "今天 -- 次 · --", 0, 0, &ark12, C_MUTED);
-    dline(cr, 10, 192, 206);
-    txt(cr, "今天", 10, 203, &ark12, C_MUTED);
-    U.hm_tick = segbar(cr, 44, 206, 172, 6, 24, C_PURPLE);
-    ui_clicks(cr);
+    // ---- right pane: magpie, today at a glance
+    lv_obj_t *cr = pane(p, 244, 8, 230, 210);
+    pane_title(cr, "magpie", C_PURPLE);
+    U.mg_state = pane_title(cr, "offline", C_FAINT, true);
+    U.mg_calls = txt(cr, "--", 10, 12, &ark24, C_TEXT);
+    txt(cr, "今天调用", 10, 40, &ark12, C_MUTED);
+    U.mg_tok = kv(cr, "token", 10, 220, 62, 120);
+    U.mg_cost = kv(cr, "费用", 10, 220, 78, 120);
+    U.mg_costk = lv_obj_get_child(cr, lv_obj_get_child_cnt(cr) - 2);  // "费用 30d" key
+    U.mg_sess = kv(cr, "会话", 10, 220, 94, 120);
+    U.mg_last = kv(cr, "最近", 10, 220, 110, 120);
+    dline(cr, 8, 130, 214);
+    U.mg_cap = txt(cr, "token / 30d", 10, 138, &ark12, C_MUTED);
+    U.mg_max = txt_r(cr, "", 220, 138, 80, &ark12, C_FAINT);
+    bars_create(cr, U.mg_bars, 10, 200);
+    U.mg_empty = txt(cr, "暂无数据", 0, 0, &ark12, C_FAINT);
+    lv_obj_align(U.mg_empty, LV_ALIGN_TOP_MID, 0, 170);
+    lv_obj_add_flag(cr, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_border_color(cr, lv_color_hex(C_MUTED), LV_STATE_PRESSED);
     lv_obj_add_event_cb(cr, [](lv_event_t *e) { page_request(PG_AGENTS); }, LV_EVENT_CLICKED, NULL);
 }
@@ -714,58 +743,48 @@ static void build_home() {
 // ------------------------------------------------------------------ state pages
 static void build_state(int idx, int page_id, bool confirm) {
     lv_obj_t *p = pg[page_id] = make_page();
-    if (confirm) {
-        lv_obj_set_style_border_width(p, 2, 0);
-        lv_obj_set_style_border_color(p, lv_color_hex(C_AMBER), 0);
-    }
-    home_btn(p);
-    avatar_create(s_av_state[idx], p, 118, 128, true, 54);
+    avatar_create(s_av_state[idx], p, 96, 82, true, 8);
     avatar_mode(s_av_state[idx], idx == 0 ? AV_THINK : (idx == 1 ? AV_CODE : AV_CONFIRM));
 
     // three pips under the avatar: which state page this is, tap one to switch
     for (int k = 0; k < 3; k++) {
-        lv_obj_t *hit = obj(p, 118 - 66 + k * 44, 222, 44, 36);
+        lv_obj_t *hit = obj(p, 96 - 66 + k * 44, 142, 44, 32);
         lv_obj_add_flag(hit, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_add_event_cb(hit, tab_cb, LV_EVENT_CLICKED, (void *)(intptr_t)(PG_STATE_THINK + k));
-        lv_obj_t *pip = U.st_pip[idx][k] = obj(hit, k == idx ? 6 : 15, 15, k == idx ? 32 : 14, 6);
-        lv_obj_set_style_radius(pip, 3, 0);
-        lv_obj_set_style_bg_color(pip, lv_color_hex(C_DIM), 0);
-        lv_obj_set_style_bg_opa(pip, LV_OPA_COVER, 0);
+        lv_obj_t *pip = U.st_pip[idx][k] = obj(hit, k == idx ? 6 : 15, 13, k == idx ? 32 : 14, 6);
+        fill(pip, C_DIM);
     }
+    U.st_name[idx] = txt_clip(p, "--", 6, 186, 180, &ark12, C_TEXT);
+    lv_obj_set_style_text_align(U.st_name[idx], LV_TEXT_ALIGN_CENTER, 0);
 
-    card(p, 234, 8, 238, 256);
-    U.st_agent[idx] = txt_clip(p, "CLAUDE CODE", 244, 15, 150, &ark12, C_ORANGE);
-    U.st_sess[idx] = txt(p, "-- 个会话", 0, 0, &ark12, C_MUTED);
-    lv_obj_align(U.st_sess[idx], LV_ALIGN_TOP_RIGHT, -18, 15);
+    lv_obj_t *c = pane(p, 192, 8, 282, 210, confirm ? C_AMBER : C_LINE);
+    U.st_title_l[idx] = pane_title(c, "claude", C_MUTED);
+    U.st_sess[idx] = pane_title(c, "-- 个会话", C_MUTED, true);
 
-    lv_obj_t *tr = hrow(p, 244, 32, 220, 28, 4, LV_FLEX_ALIGN_START);
-    U.st_star[idx] = txt(tr, "★", 0, 0, &ark24, C_ORANGE);
-    show(U.st_star[idx], !confirm);
-    U.st_title[idx] = txt(tr, "斟酌中", 0, 0, &ark24, C_ORANGE);
-    U.st_sub[idx] = txt_clip(p, "", 244, 64, 218, &ark12, C_MUTED);
-    dline(p, 244, 84, 218);
+    U.st_title[idx] = txt(c, confirm ? "! 等你确认" : (idx == 0 ? "> 斟酌中" : "> 编写代码"), 10, 8,
+                          &ark24, confirm ? C_AMBER : C_TEXT);
+    U.st_cursor[idx] = obj(c, 0, 0, 12, 20);
+    fill(U.st_cursor[idx], confirm ? C_AMBER : C_TEXT);
+    lv_obj_align_to(U.st_cursor[idx], U.st_title[idx], LV_ALIGN_OUT_RIGHT_MID, 4, 0);
+    U.st_sub[idx] = txt_clip(c, "", 10, 38, 262, &ark12, C_MUTED);
+    dline(c, 8, 58, 266);
 
-    U.st_l5[idx] = txt(p, "5 小时额度", 244, 98, &ark12, C_TEXT);
-    U.st_p5[idx] = txt(p, "--", 0, 0, &ark24, C_GREEN);
-    lv_obj_align(U.st_p5[idx], LV_ALIGN_TOP_RIGHT, -18, 92);
-    U.st_bar5[idx] = segbar(p, 244, 120, 218, 12, 20, C_GREEN);
+    U.st_l5[idx] = txt(c, "5 小时额度", 10, 68, &ark12, C_TEXT);
+    U.st_p5[idx] = txt_r(c, "--", 270, 68, 60, &ark12, C_TEXT);
+    U.st_bar5[idx] = tbar(c, 10, 84, 21);
+    U.st_l7[idx] = txt(c, "7 天额度", 10, 104, &ark12, C_TEXT);
+    U.st_p7[idx] = txt_r(c, "--", 270, 104, 60, &ark12, C_TEXT);
+    U.st_bar7[idx] = tbar(c, 10, 120, 21);
 
-    U.st_l7[idx] = txt(p, "7 天额度", 244, 146, &ark12, C_TEXT);
-    U.st_p7[idx] = txt(p, "--", 0, 0, &ark24, C_GREEN);
-    lv_obj_align(U.st_p7[idx], LV_ALIGN_TOP_RIGHT, -18, 140);
-    U.st_bar7[idx] = segbar(p, 244, 168, 218, 12, 20, C_GREEN);
-
-    U.st_reset[idx] = txt(p, "", 244, 188, &ark12, C_MUTED);
-    U.st_src[idx] = txt_clip(p, "", 244, 206, 218, &ark12, C_MUTED);
-    lv_obj_t *cn = hrow(p, 244, 228, 200, 16, 6, LV_FLEX_ALIGN_START);
-    dot(cn, 0, 0, 6, C_GREEN);
-    U.st_conn[idx] = txt(cn, "未连接", 0, 0, &ark12, C_MUTED);
-
+    U.st_reset[idx] = txt_clip(c, "", 10, 142, 262, &ark12, C_MUTED);
+    U.st_src[idx] = txt_clip(c, "", 10, 158, 262, &ark12, C_MUTED);
+    U.st_conn_dot[idx] = dot(c, 10, 190, 6, C_FAINT);
+    U.st_conn[idx] = txt(c, "未连接", 22, 186, &ark12, C_MUTED);
 }
 
 // ------------------------------------------------------------------ agents
 // Tapping a row opens the agent's sheet: its avatar (pokeable), what it ran
-// in the last 30 days, and a button to follow it on the home card and the
+// in the last 30 days, and a button to follow it on the home pane and the
 // state pages.
 static void sheet_fill();
 
@@ -831,14 +850,14 @@ static void sheet_follow_cb(lv_event_t *e) {
     if (!same) page_request(PG_STATE_THINK);
 }
 
+// outlined terminal button; filled when it is the primary action
 static lv_obj_t *button(lv_obj_t *p, int x, int y, int w, const char *s, uint32_t bg, uint32_t col) {
-    lv_obj_t *b = obj(p, x, y, w, 30);
-    lv_obj_set_style_radius(b, 4, 0);
+    lv_obj_t *b = obj(p, x, y, w, 28);
     lv_obj_set_style_bg_color(b, lv_color_hex(bg), 0);
-    lv_obj_set_style_bg_opa(b, bg == C_CARD ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_opa(b, bg == C_BG ? LV_OPA_TRANSP : LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(b, 1, 0);
-    lv_obj_set_style_border_color(b, lv_color_hex(bg == C_CARD ? C_LINE : bg), 0);
-    lv_obj_set_style_bg_color(b, lv_color_hex(C_DIM), LV_STATE_PRESSED);
+    lv_obj_set_style_border_color(b, lv_color_hex(bg == C_BG ? C_LINE : bg), 0);
+    lv_obj_set_style_bg_color(b, lv_color_hex(C_LINE), LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_STATE_PRESSED);
     lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_t *l = txt(b, s, 0, 0, &ark12, col);
@@ -846,75 +865,82 @@ static lv_obj_t *button(lv_obj_t *p, int x, int y, int w, const char *s, uint32_
     return b;
 }
 
+// fixed columns shared by the header and every row
+#define AGC_NAME 34
+#define AGC_MODEL 190
+#define AGC_STATE 352
+#define AGC_CALLS 456
+
 static void build_agents() {
     lv_obj_t *p = pg[PG_AGENTS] = make_page();
-    home_btn(p);
-    tabs(p, 0, PG_AGENTS);
 
     // every agent magpie manages: more than fit, so the list scrolls
-    lv_obj_t *c = card(p, 6, 46, 468, 220);
-    lv_obj_t *sc = U.ag_list = obj(c, 0, 2, 466, 214);
+    lv_obj_t *c = pane(p, 6, 8, 468, 210);
+    pane_title(c, "agents", C_MUTED);
+    U.ag_count = pane_title(c, "--", C_MUTED, true);
+    txt(c, "NAME", AGC_NAME, 6, &ark10, C_FAINT);
+    txt(c, "MODEL", AGC_MODEL, 6, &ark10, C_FAINT);
+    txt(c, "STATE", AGC_STATE, 6, &ark10, C_FAINT);
+    txt_r(c, "30D", AGC_CALLS, 6, 40, &ark10, C_FAINT);
+    hline(c, 8, 19, 452, C_DIM);
+
+    lv_obj_t *sc = U.ag_list = obj(c, 1, 21, 466, 188);
     lv_obj_add_flag(sc, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(sc, agent_input_trace, LV_EVENT_ALL, (void *)(intptr_t)-1);
     lv_obj_set_scroll_dir(sc, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(sc, LV_SCROLLBAR_MODE_ACTIVE);
     lv_obj_set_style_width(sc, 3, LV_PART_SCROLLBAR);
     lv_obj_set_style_bg_color(sc, lv_color_hex(C_MUTED), LV_PART_SCROLLBAR);
-    lv_obj_set_style_bg_opa(sc, LV_OPA_60, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(sc, LV_OPA_COVER, LV_PART_SCROLLBAR);
     lv_obj_set_flex_flow(sc, LV_FLEX_FLOW_COLUMN);
 
     for (int i = 0; i < AG_ROWS; i++) {
-        lv_obj_t *r = U.ag_row[i] = obj(sc, 0, 0, 466, 34);
+        lv_obj_t *r = U.ag_row[i] = obj(sc, 0, 0, 466, 30);
         lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_style_bg_color(r, lv_color_hex(C_DIM), LV_STATE_PRESSED);
         lv_obj_set_style_bg_opa(r, LV_OPA_COVER, LV_STATE_PRESSED);
         lv_obj_add_event_cb(r, agent_input_trace, LV_EVENT_ALL, (void *)(intptr_t)i);
         lv_obj_add_event_cb(r, agent_row_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
-        if (i) dline(r, 10, 0, 446);
         U.ag_icon[i] = logo(r);
-        lv_obj_set_pos(U.ag_icon[i], 12, 7);
-        U.ag_live[i] = dot(r, 29, 24, 7, C_GREEN);  // working right now
-        lv_obj_set_style_radius(U.ag_live[i], 4, 0);
+        lv_obj_set_pos(U.ag_icon[i], 7, 5);
+        U.ag_live[i] = dot(r, 23, 19, 6, C_GREEN);  // working right now
         lv_obj_set_style_border_width(U.ag_live[i], 1, 0);
-        lv_obj_set_style_border_color(U.ag_live[i], lv_color_hex(C_CARD), 0);
-        U.ag_name[i] = txt(r, "--", 44, 9, &ark16, C_TEXT);
-        lv_obj_t *rt = hrow(r, 200, 0, 254, 34, 8, LV_FLEX_ALIGN_END);
-        U.ag_detail[i] = txt(rt, "", 0, 0, &ark12, C_MUTED);
-        lv_label_set_long_mode(U.ag_detail[i], LV_LABEL_LONG_DOT);
-        lv_obj_set_style_max_width(U.ag_detail[i], 180, 0);
-        U.ag_state[i] = txt(rt, "", 0, 0, &ark12, C_MUTED);
-        U.ag_calls[i] = txt(rt, "", 0, 0, &ark12, C_GREEN);
+        lv_obj_set_style_border_color(U.ag_live[i], lv_color_hex(C_BG), 0);
+        U.ag_name[i] = txt_clip(r, "--", AGC_NAME - 1, 9, 150, &ark12, C_TEXT);
+        U.ag_detail[i] = txt_clip(r, "", AGC_MODEL - 1, 9, 156, &ark12, C_MUTED);
+        U.ag_state[i] = txt(r, "", AGC_STATE - 1, 9, &ark12, C_MUTED);
+        U.ag_calls[i] = txt_r(r, "", AGC_CALLS - 1, 9, 50, &ark12, C_GREEN);
         show(r, false);
     }
 
-    // ---- the sheet, over the list
-    lv_obj_t *s = U.sh = card(p, 6, 46, 468, 220);
-    lv_obj_add_flag(s, LV_OBJ_FLAG_CLICKABLE);  // swallow taps meant for rows below
-    avatar_create(s_av_sheet, s, 66, 96, false, 38);
+    // ---- the sheet, over the list: a full-page backdrop (it also hides the
+    // list's own pane titles) holding a pane of its own
+    U.sh = obj(p, 0, 0, LCD_W, PAGE_H);
+    fill(U.sh, C_BG);
+    lv_obj_add_flag(U.sh, LV_OBJ_FLAG_CLICKABLE);  // swallow taps meant for rows below
+    lv_obj_t *s = pane(U.sh, 6, 8, 468, 210, C_CYAN);
+    lv_obj_add_flag(s, LV_OBJ_FLAG_EVENT_BUBBLE);
+    pane_title(s, "agent", C_CYAN);
+    avatar_create(s_av_sheet, s, 56, 74, false, 8);
     avatar_mode(s_av_sheet, AV_IDLE);
-    lv_obj_t *hint = txt(s, "轻触头像", 0, 0, &ark12, C_FAINT);
-    lv_obj_align(hint, LV_ALIGN_TOP_LEFT, 66 - 24, 152);
+    txt(s, "轻触头像", 32, 128, &ark12, C_FAINT);
 
-    U.sh_name = txt_clip(s, "--", 140, 12, 220, &ark16, C_TEXT);
-    U.sh_model = txt_clip(s, "", 140, 34, 316, &ark12, C_MUTED);
+    U.sh_name = txt_clip(s, "--", 120, 10, 336, &ark12, C_TEXT);
+    U.sh_model = txt_clip(s, "", 120, 26, 336, &ark12, C_MUTED);
+    dline(s, 120, 46, 336);
     static const char *labels[4] = {"30 天调用", "今天", "Token", "费用"};
     for (int k = 0; k < 4; k++) {
-        const int x = 140 + (k % 2) * 160, y = 58 + (k / 2) * 44;
-        lv_obj_t *cell = obj(s, x, y, 150, 38);
-        lv_obj_set_style_radius(cell, 4, 0);
-        lv_obj_set_style_bg_color(cell, lv_color_hex(C_BG), 0);
-        lv_obj_set_style_bg_opa(cell, LV_OPA_COVER, 0);
-        U.sh_num[k] = txt(cell, "--", 8, 3, &ark16, C_TEXT);
-        txt(cell, labels[k], 8, 22, &ark12, C_MUTED);
+        const int x = 120 + (k % 2) * 176, y = 56 + (k / 2) * 18;
+        U.sh_num[k] = kv(s, labels[k], x, x + 160, y, 80);
     }
-    U.sh_share = txt(s, "", 140, 152, &ark12, C_MUTED);
-    U.sh_bar = segbar(s, 140, 170, 316, 6, 24, C_PURPLE);
-    U.sh_last = txt_clip(s, "", 140, 190, 140, &ark12, C_MUTED);
-    lv_obj_t *cb = button(s, 290, 182, 70, "关闭", C_CARD, C_MUTED);
+    U.sh_share = txt(s, "", 120, 98, &ark12, C_MUTED);
+    U.sh_bar = tbar(s, 120, 114, 28);
+    U.sh_last = txt_clip(s, "", 120, 136, 336, &ark12, C_MUTED);
+    lv_obj_t *cb = U.sh_close = button(s, 288, 170, 76, "关闭", C_BG, C_MUTED);
     lv_obj_add_event_cb(cb, [](lv_event_t *e) { sheet_close(); }, LV_EVENT_CLICKED, NULL);
-    U.sh_follow = button(s, 368, 182, 90, "跟随", C_PURPLE, C_TEXT);
+    U.sh_follow = button(s, 372, 170, 86, "跟随", C_CYAN, C_BG);
     lv_obj_add_event_cb(U.sh_follow, sheet_follow_cb, LV_EVENT_CLICKED, NULL);
-    show(s, false);
+    show(U.sh, false);
 }
 
 void ui_sheet_benchmark() {
@@ -949,14 +975,13 @@ void ui_sheet_benchmark() {
             delay(5);
         }
         lv_area_t close_area;
-        // button() creates the close button immediately before follow.
-        lv_obj_t *close_button = lv_obj_get_child(U.sh, lv_obj_get_child_cnt(U.sh) - 2);
-        lv_obj_get_coords(close_button, &close_area);
+        lv_obj_get_coords(U.sh_close, &close_area);
         display_test_tap((close_area.x1 + close_area.x2) / 2,
                          (close_area.y1 + close_area.y2) / 2);
         const bool closed = lv_obj_has_flag(U.sh, LV_OBJ_FLAG_HIDDEN);
         cases++;
         // Opening details should show data, not launch a blocking ornamental hop.
+        // The idle breathing loop is fine; only a hop (it starts at -14) is not.
         const bool pass = opened && closed && drained && !auto_hop;
         if (!pass) failed++;
         Serial.printf("[sheettest] %s trial=%d row=%d opened=%d closed=%d first_incl_hold=%u ms auto_hop=%d busy_500ms=%u ms max_tick=%u ms\n",
@@ -970,52 +995,42 @@ void ui_sheet_benchmark() {
 }
 
 // ------------------------------------------------------------------ quota
+// One pane per provider, one meter line per quota window. Panes stack in a
+// flex column, so a provider with four windows simply takes more room and the
+// rest scroll under it.
+#define QL_STEP 18
+
 static void build_quota() {
     lv_obj_t *p = pg[PG_QUOTA] = make_page();
-    home_btn(p);
-    tabs(p, 1, PG_QUOTA);
 
-    // one block per provider (header line + card); more than two do not fit,
-    // so they scroll under the pinned tabs
-    lv_obj_t *sc = obj(p, 0, 42, LCD_W, LCD_H - 42);
+    lv_obj_t *sc = obj(p, 0, 0, LCD_W, PAGE_H);
     lv_obj_add_flag(sc, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_scroll_dir(sc, LV_DIR_VER);
     lv_obj_set_scrollbar_mode(sc, LV_SCROLLBAR_MODE_ACTIVE);
     lv_obj_set_style_width(sc, 3, LV_PART_SCROLLBAR);
     lv_obj_set_style_bg_color(sc, lv_color_hex(C_MUTED), LV_PART_SCROLLBAR);
-    lv_obj_set_style_bg_opa(sc, LV_OPA_60, LV_PART_SCROLLBAR);
-    lv_obj_set_style_pad_bottom(sc, 6, 0);
+    lv_obj_set_style_bg_opa(sc, LV_OPA_COVER, LV_PART_SCROLLBAR);
+    lv_obj_set_flex_flow(sc, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_top(sc, 2, 0);
+    lv_obj_set_style_pad_row(sc, 4, 0);
+    lv_obj_set_style_pad_bottom(sc, 8, 0);
     U.q_empty = txt(sc, "暂无额度数据", 0, 0, &ark12, C_MUTED);
-    lv_obj_align(U.q_empty, LV_ALIGN_TOP_MID, 0, 90);
+    lv_obj_add_flag(U.q_empty, LV_OBJ_FLAG_IGNORE_LAYOUT);
+    lv_obj_align(U.q_empty, LV_ALIGN_TOP_MID, 0, 100);
 
     for (int i = 0; i < QUOTA_MAX_PROV; i++) {
-        lv_obj_t *b = U.q_blk[i] = obj(sc, 0, i * 104, LCD_W, 102);
+        lv_obj_t *b = U.q_blk[i] = obj(sc, 0, 0, LCD_W, 6 + 12 + QUOTA_MAX_WIN * QL_STEP);
         lv_obj_add_flag(b, LV_OBJ_FLAG_EVENT_BUBBLE);
-        U.q_dot[i] = dot(b, 10, 10, 6, C_ORANGE);
-        U.q_name[i] = txt(b, "--", 22, 5, &ark12, C_MUTED);
-        lv_obj_t *left = txt(b, "剩余", 0, 0, &ark12, C_TEXT);
-        U.q_word[i] = left;
-        lv_obj_set_style_bg_color(left, lv_color_hex(C_DIM), 0);
-        lv_obj_set_style_bg_opa(left, LV_OPA_COVER, 0);
-        lv_obj_set_style_radius(left, 2, 0);
-        lv_obj_set_style_pad_hor(left, 4, 0);
-        lv_obj_align(left, LV_ALIGN_TOP_RIGHT, -8, 4);
-        U.q_plan[i] = txt(b, "", 0, 0, &ark12, C_MUTED);
-        lv_obj_align(U.q_plan[i], LV_ALIGN_TOP_RIGHT, -48, 5);
-
-        lv_obj_t *c = card(b, 6, 24, 468, 74);
+        lv_obj_t *c = U.q_pane[i] = pane(b, 6, 6, 468, 12 + QUOTA_MAX_WIN * QL_STEP);
         lv_obj_add_flag(c, LV_OBJ_FLAG_EVENT_BUBBLE);
-        U.q_user[i] = txt_clip(c, "--", 12, 12, 220, &ark16, C_TEXT);
-        U.q_reset[i] = txt_clip(c, "", 12, 44, 220, &ark12, C_MUTED);
+        U.q_name[i] = pane_title(c, "--", C_TEXT);
+        U.q_user[i] = pane_title(c, "", C_MUTED, true);
         for (int j = 0; j < QUOTA_MAX_WIN; j++) {
-            const int x = 466 - 10 - (QUOTA_MAX_WIN - j) * 54 + 6;
-            U.q_ring[i][j] = ring(c, x, 6, 44, C_GREEN);
-            // child of the arc + style alignment: stays centred as the text changes
-            U.q_pct[i][j] = txt(U.q_ring[i][j], "", 0, 0, &ark10, C_TEXT);
-            lv_obj_center(U.q_pct[i][j]);
-            U.q_win[i][j] = txt(c, "", x - 5, 52, &ark10, C_MUTED);
-            lv_obj_set_width(U.q_win[i][j], 54);
-            lv_obj_set_style_text_align(U.q_win[i][j], LV_TEXT_ALIGN_CENTER, 0);
+            const int y = 9 + j * QL_STEP;
+            U.q_key[i][j] = txt_clip(c, "", 10, y, 96, &ark12, C_TEXT);
+            U.q_bar[i][j] = tbar(c, 110, y, 16);
+            U.q_pct[i][j] = txt_r(c, "", 344, y, 40, &ark12, C_TEXT);
+            U.q_rst[i][j] = txt_clip(c, "", 352, y, 108, &ark12, C_FAINT);
         }
         show(b, false);
     }
@@ -1034,10 +1049,8 @@ static void filter_apply(int idx) {
     for (int i = 0; i < 4; i++) {
         if (!u_filter[i]) continue;
         const bool sel = i == idx;
-        lv_obj_set_style_bg_opa(u_filter[i], sel ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_color(u_filter[i], lv_color_hex(sel ? C_PURPLE : C_LINE), 0);
-        lv_obj_t *l = lv_obj_get_child(u_filter[i], 0);
-        if (l) lv_obj_set_style_text_color(l, lv_color_hex(sel ? C_TEXT : C_MUTED), 0);
+        set_bg(u_filter[i], sel ? C_GREEN : C_DIM);
+        set_color(lv_obj_get_child(u_filter[i], 0), sel ? C_BG : C_MUTED);
     }
     app_request_refresh();
 }
@@ -1048,172 +1061,132 @@ void ui_cycle_period() {
     Serial.printf("[ui] usage period -> %s\n", names[s_filter]);
 }
 
-static void filter_cb(lv_event_t *e) {
-    const int idx = (int)(intptr_t)lv_event_get_user_data(e);
-    static const char *periods[4] = {"today", "7d", "30d", "all"};
-    filter_apply(idx);
-}
+static void filter_cb(lv_event_t *e) { filter_apply((int)(intptr_t)lv_event_get_user_data(e)); }
 
-#define CH_X0 44
+#define CH_X0 46
 #define CH_W 420
-#define CH_BASE 246
-#define CH_H 44
+#define CH_BASE 202
+#define CH_H 36
 
 static void build_usage() {
     lv_obj_t *p = pg[PG_USAGE] = make_page();
-    home_btn(p);
-    tabs(p, 2, PG_USAGE);
 
     static const char *fname[4] = {"今天", "7 天", "30 天", "全部"};
-    int x = 6;
     for (int i = 0; i < 4; i++) {
-        const int w = 52;
-        lv_obj_t *b = obj(p, x, 47, w, 24);
-        lv_obj_set_style_radius(b, 3, 0);
-        lv_obj_set_style_border_width(b, 1, 0);
-        lv_obj_set_style_border_color(b, lv_color_hex(i == 2 ? C_PURPLE : C_LINE), 0);
-        lv_obj_set_style_bg_color(b, lv_color_hex(C_PURPLE), 0);
-        lv_obj_set_style_bg_opa(b, i == 2 ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-        lv_obj_t *l = txt(b, fname[i], 0, 0, &ark12, i == 2 ? C_TEXT : C_MUTED);
+        lv_obj_t *b = obj(p, 6 + i * 58, 4, 54, 22);
+        fill(b, i == s_filter ? C_GREEN : C_DIM);
+        lv_obj_t *l = txt(b, fname[i], 0, 0, &ark12, i == s_filter ? C_BG : C_MUTED);
         lv_obj_center(l);
         lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_ext_click_area(b, 2);
         lv_obj_add_event_cb(b, filter_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
         u_filter[i] = b;
-        x += w + 6;
     }
-    lv_obj_t *src = txt(p, "网关 + 会话日志", 0, 0, &ark12, C_MUTED);
-    lv_obj_align(src, LV_ALIGN_TOP_RIGHT, -8, 53);
+    txt_r(p, "src: 网关 + 会话日志", LCD_W - 6, 9, 200, &ark12, C_FAINT);
 
-    // 4 KPI blocks
-    static const char *titles[4] = {"Token", "请求", "费用", "缓存命中率"};
-    const uint32_t vals_col[4] = {C_PURPLE, C_TEXT, C_GREEN, C_TEXT};
+    // 4 KPI panes
+    static const char *titles[4] = {"token", "请求", "费用", "缓存命中"};
+    const uint32_t vals_col[4] = {C_GREEN, C_TEXT, C_AMBER, C_CYAN};
     lv_obj_t *v[4], *c[4];
     for (int i = 0; i < 4; i++) {
-        c[i] = card(p, 6 + i * 118, 78, 112, 104);
-        txt(c[i], titles[i], 8, 6, &ark12, C_MUTED);
-        v[i] = txt(c[i], "--", 8, 24, &ark24, vals_col[i]);
+        c[i] = pane(p, 6 + i * 119, 40, 111, 92);
+        pane_title(c[i], titles[i], C_MUTED);
+        v[i] = txt(c[i], "--", 8, 10, &ark24, vals_col[i]);
     }
     U.u_tok = v[0];
     U.u_calls = v[1];
     U.u_cost = v[2];
     U.u_hit = v[3];
-    U.u_in = txt(c[0], "", 8, 54, &ark12, C_MUTED);
-    U.u_out = txt(c[0], "", 8, 67, &ark12, C_MUTED);
-    U.u_cache = txt(c[0], "", 8, 80, &ark12, C_MUTED);
-    U.u_err = txt(c[1], "", 8, 60, &ark12, C_RED);
-    U.u_price = txt(c[2], "", 8, 60, &ark12, C_MUTED);  // filled with the average cost
-    U.u_hit2 = txt(c[3], "占提示词", 8, 60, &ark12, C_MUTED);
+    U.u_in = txt(c[0], "", 8, 42, &ark12, C_MUTED);
+    U.u_out = txt(c[0], "", 8, 56, &ark12, C_MUTED);
+    U.u_cache = txt(c[0], "", 8, 70, &ark12, C_MUTED);
+    U.u_err = txt(c[1], "", 8, 42, &ark12, C_RED);
+    U.u_price = txt_clip(c[2], "", 8, 42, 96, &ark12, C_MUTED);  // average cost per call
+    U.u_hit2 = txt(c[3], "占提示词", 8, 42, &ark12, C_MUTED);
 
-    // bar chart: hand-drawn bars (the lv_chart widget drew outside its own area
-    // on this panel and could not be clipped reliably)
-    card(p, 6, 188, 468, 78);
-    U.u_ymax = txt(p, "--", 12, 194, &ark10, C_MUTED);
-    txt(p, "0", 12, CH_BASE - 8, &ark10, C_MUTED);
-    for (int i = 0; i < SERIES_MAX; i++) {
-        U.u_bars[i] = obj(p, CH_X0, CH_BASE - 2, 8, 2);
-        lv_obj_set_style_bg_color(U.u_bars[i], lv_color_hex(C_PURPLE), 0);
-        lv_obj_set_style_bg_opa(U.u_bars[i], LV_OPA_COVER, 0);
-        show(U.u_bars[i], false);
-    }
+    lv_obj_t *ch = pane(p, 6, 144, 468, 74);
+    pane_title(ch, "token / 时段", C_MUTED);
+    U.u_ymax = txt_r(p, "--", CH_X0 - 6, CH_BASE - CH_H - 4, 36, &ark10, C_FAINT);
+    txt_r(p, "0", CH_X0 - 6, CH_BASE - 9, 36, &ark10, C_FAINT);
+    hline(p, CH_X0, CH_BASE, CH_W, C_LINE);
+    bars_create(p, U.u_bars, CH_X0, CH_BASE);
     for (int i = 0; i < 5; i++) {
-        U.u_lbl[i] = txt(p, "", 0, CH_BASE + 4, &ark10, C_MUTED);
+        U.u_lbl[i] = txt(p, "", 0, CH_BASE + 3, &ark10, C_FAINT);
         lv_obj_set_width(U.u_lbl[i], 40);
         lv_obj_set_style_text_align(U.u_lbl[i], LV_TEXT_ALIGN_CENTER, 0);
     }
-    U.u_empty = txt(p, "暂无数据", 0, 0, &ark12, C_MUTED);
-    lv_obj_align(U.u_empty, LV_ALIGN_TOP_MID, 0, 216);
+    U.u_empty = txt(p, "暂无数据", 0, 0, &ark12, C_FAINT);
+    lv_obj_align(U.u_empty, LV_ALIGN_TOP_MID, 0, 176);
 }
 
 // ------------------------------------------------------------------ routes
-static void build_routes(int page_id, int rows) {
-    lv_obj_t *p = pg[page_id] = make_page();
-    home_btn(p);
-    tabs(p, 3, page_id);
+// fixed columns of the request log
+#define RC_TIME 8
+#define RC_ICON 62
+#define RC_AGENT 86
+#define RC_MODEL 196
+#define RC_RIGHT 456
 
+static void build_routes(int page_id) {
+    lv_obj_t *p = pg[page_id] = make_page();
     const int idx = (page_id == PG_ROUTES) ? 0 : 1;
-    U.r_sum[idx] = txt(p, "今天 -- 次调用 · -- token", 10, 49, &ark12, C_TEXT);
+
+    // summary line; tapping it expands to the log-only page and back
+    lv_obj_t *sum = obj(p, 0, 0, LCD_W, 24);
+    lv_obj_add_flag(sum, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(sum, tab_cb, LV_EVENT_CLICKED,
+                        (void *)(intptr_t)(idx ? PG_ROUTES : PG_ROUTES_LIST));
+    U.r_sum[idx] = txt(sum, "今天 -- 次调用 · -- token", 6, 6, &ark12, C_TEXT);
+    txt_r(sum, idx ? "收起 «" : "展开 »", LCD_W - 6, 6, 80, &ark12, C_MUTED);
 
     int y0;
-    if (page_id == PG_ROUTES) {
-        // topology strip: agent -> magpie -> upstream account
-        card(p, 6, 70, 468, 40);
-        lv_obj_t *a = hrow(p, 14, 78, 130, 24, 6, LV_FLEX_ALIGN_START);
-        lv_obj_set_style_border_width(a, 1, 0);
-        lv_obj_set_style_border_color(a, lv_color_hex(C_PURPLE), 0);
-        lv_obj_set_style_radius(a, 3, 0);
-        lv_obj_set_style_pad_hor(a, 6, 0);
-        U.r_top_icon = logo(a);
-        U.r_top_agent = txt_clip(a, "--", 0, 0, 92, &ark12, C_TEXT);
-        dline(p, 148, 90, 68);
-        lv_obj_t *g = obj(p, 222, 74, 36, 32);
-        lv_obj_set_style_radius(g, 3, 0);
-        lv_obj_set_style_bg_color(g, lv_color_hex(C_TEXT), 0);
-        lv_obj_set_style_bg_opa(g, LV_OPA_COVER, 0);
-        lv_obj_t *gm = img(g, &bird, 4, 4);
-        lv_img_set_pivot(gm, 0, 0);
-        lv_img_set_zoom(gm, 75);
-        lv_obj_set_style_img_recolor(gm, lv_color_hex(C_BG), 0);
-        lv_obj_set_style_img_recolor_opa(gm, LV_OPA_COVER, 0);
-        dline(p, 262, 90, 26);
-        lv_obj_t *b = hrow(p, 292, 78, 174, 24, 6, LV_FLEX_ALIGN_START);
-        lv_obj_set_style_border_width(b, 1, 0);
-        lv_obj_set_style_border_color(b, lv_color_hex(C_LINE), 0);
-        lv_obj_set_style_radius(b, 3, 0);
-        lv_obj_set_style_pad_hor(b, 6, 0);
-        dot(b, 0, 0, 6, C_GREEN);
-        U.r_top_to = txt_clip(b, "--", 0, 0, 148, &ark12, C_MUTED);
-        y0 = 116;
+    if (idx == 0) {
+        // topology: agent ──▶ magpie ──▶ upstream account
+        lv_obj_t *t = pane(p, 6, 30, 468, 32);
+        pane_title(t, "route", C_MUTED);
+        U.r_top_icon = logo(t);
+        lv_obj_set_pos(U.r_top_icon, 8, 5);
+        U.r_top_agent = txt_clip(t, "--", 34, 9, 110, &ark12, C_TEXT);
+        txt(t, "──▶", 148, 9, &ark12, C_FAINT);
+        txt(t, "magpie", 188, 9, &ark12, C_PURPLE);
+        txt(t, "──▶", 230, 9, &ark12, C_FAINT);
+        U.r_top_dot = dot(t, 272, 13, 6, C_GREEN);
+        U.r_top_to = txt_clip(t, "--", 284, 9, 176, &ark12, C_MUTED);
+        y0 = 74;
     } else {
-        y0 = 70;
+        y0 = 32;
     }
 
-    // one card holding every row, separated by dashed rules (like the design).
-    // More rows than fit => the rows live in a scroll area (agents list pattern).
-    const int step = 46;
-    lv_obj_t *c;
-    lv_obj_t *host;
-    if (rows > 2) {
-        c = card(p, 6, y0, 468, LCD_H - y0 - 6);
-        host = obj(c, 0, 2, 466, LCD_H - y0 - 12);
-        // Dragging needs CLICKABLE, and the bar must be always-on: with ACTIVE
-        // mode it stayed invisible until dragged, so nobody knew there were more
-        // rows than the four that fit.
-        lv_obj_add_flag(host, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_scroll_dir(host, LV_DIR_VER);
-        lv_obj_set_scrollbar_mode(host, LV_SCROLLBAR_MODE_ON);
-        lv_obj_set_style_width(host, 4, LV_PART_SCROLLBAR);
-        lv_obj_set_style_bg_color(host, lv_color_hex(C_DIM), LV_PART_SCROLLBAR);
-        lv_obj_set_style_bg_opa(host, LV_OPA_COVER, LV_PART_SCROLLBAR);
-        U.r_scroll[idx] = host;
-    } else {
-        c = card(p, 6, y0, 468, rows * step + 4);
-        host = c;
-    }
-    U.r_empty[idx] = txt(host, "今日暂无调用", 0, 0, &ark12, C_MUTED);
+    lv_obj_t *c = pane(p, 6, y0, 468, 218 - y0);
+    pane_title(c, "log", C_MUTED);
+    U.r_count[idx] = pane_title(c, "", C_MUTED, true);
+    lv_obj_t *host = U.r_scroll[idx] = obj(c, 1, 5, 466, 218 - y0 - 8);
+    // Dragging needs CLICKABLE, and the bar is always on: with ACTIVE mode it
+    // stayed invisible until dragged, so nobody knew there were more rows.
+    lv_obj_add_flag(host, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_scroll_dir(host, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(host, LV_SCROLLBAR_MODE_ON);
+    lv_obj_set_style_width(host, 3, LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_color(host, lv_color_hex(C_LINE), LV_PART_SCROLLBAR);
+    lv_obj_set_style_bg_opa(host, LV_OPA_COVER, LV_PART_SCROLLBAR);
+    U.r_empty[idx] = txt(host, "暂无调用", 0, 0, &ark12, C_MUTED);
     lv_obj_center(U.r_empty[idx]);
+
+    const int step = 34;
     for (int i = 0; i < RT_ROWS; i++) {
-        U.r_row[idx][i] = nullptr;
-        if (i >= rows) continue;
-        lv_obj_t *r = U.r_row[idx][i] = obj(host, 0, 2 + i * step, 466, step);
-        if (i) dline(r, 10, 0, 446);
-        lv_obj_t *l1 = hrow(r, 10, 5, 380, 20, 6, LV_FLEX_ALIGN_START);
-        U.r_icon[idx][i] = logo(l1);
-        U.r_agent[idx][i] = txt(l1, "--", 0, 0, &ark16, C_TEXT);
-        U.r_model[idx][i] = chip(l1, "--", C_LINE, C_TEXT);
-        lv_label_set_long_mode(U.r_model[idx][i], LV_LABEL_LONG_DOT);
-        lv_obj_set_style_max_width(U.r_model[idx][i], 170, 0);
-        U.r_tag[idx][i] = chip(l1, "", C_LINE, C_MUTED);
-        U.r_time[idx][i] = txt(r, "--:--:--", 0, 0, &ark12, C_MUTED);
-        lv_obj_align(U.r_time[idx][i], LV_ALIGN_TOP_RIGHT, -10, 8);
-        U.r_flow[idx][i] = txt_clip(r, "", 30, 29, 250, &ark12, C_MUTED);
-        U.r_use[idx][i] = txt(r, "", 0, 0, &ark12, C_MUTED);
-        lv_obj_align(U.r_use[idx][i], LV_ALIGN_TOP_RIGHT, -10, 29);
+        lv_obj_t *r = U.r_row[idx][i] = obj(host, 0, i * step, 460, step);
+        if (i) dline(r, 8, 0, 448);
+        U.r_time[idx][i] = txt(r, "--:--:--", RC_TIME, 4, &ark12, C_FAINT);
+        U.r_icon[idx][i] = logo(r);
+        lv_obj_set_pos(U.r_icon[idx][i], RC_ICON, 6);
+        U.r_agent[idx][i] = txt_clip(r, "--", RC_AGENT, 4, 104, &ark12, C_TEXT);
+        U.r_model[idx][i] = txt_clip(r, "--", RC_MODEL, 4, 170, &ark12, C_CYAN);
+        U.r_tag[idx][i] = txt_r(r, "", RC_RIGHT, 4, 84, &ark12, C_MUTED);
+        U.r_flow[idx][i] = txt_clip(r, "", RC_AGENT, 19, 220, &ark12, C_MUTED);
+        U.r_use[idx][i] = txt_r(r, "", RC_RIGHT, 19, 150, &ark12, C_MUTED);
         show(r, false);
     }
 }
-
-// ------------------------------------------------------------------ clicks
-static void ui_clicks(lv_obj_t *o) { lv_obj_add_flag(o, LV_OBJ_FLAG_CLICKABLE); }
 
 
 // ---- calibration overlay: white frame + centre cross + corner blocks.
@@ -1335,7 +1308,7 @@ void ui_show_calibration(bool on) {
         lv_obj_remove_style_all(b);
         lv_obj_set_pos(b, cx[i], cy[i]);
         lv_obj_set_size(b, 24, 24);
-        lv_obj_set_style_bg_color(b, lv_color_hex(C_ORANGE), 0);
+        lv_obj_set_style_bg_color(b, lv_color_hex(C_AMBER), 0);
         lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
         lv_obj_t *t = lv_label_create(s_cal);
         lv_label_set_text(t, nm[i]);
@@ -1346,7 +1319,7 @@ void ui_show_calibration(bool on) {
     lv_obj_t *c = lv_label_create(s_cal);
     lv_label_set_text(c, "CAL");
     lv_obj_set_style_text_font(c, &ark24, 0);
-    lv_obj_set_style_text_color(c, lv_color_hex(C_PURPLE), 0);
+    lv_obj_set_style_text_color(c, lv_color_hex(C_GREEN), 0);
     lv_obj_align(c, LV_ALIGN_CENTER, 0, -20);
     s_cal_dot = lv_obj_create(s_cal);
     lv_obj_remove_style_all(s_cal_dot);
@@ -1360,21 +1333,18 @@ void ui_show_calibration(bool on) {
 
 // ------------------------------------------------------------- settings page
 // Everything here persists through appcfg (NVS "cfg"), so a power cycle keeps
-// the choices. Rows are 464x32 with the label left and the current value right;
+// the choices. Rows are 466x34 with the label left and the current value right;
 // tapping cycles the value, except the name row which opens a keyboard and the
-// link row which forces a refresh.
-static void s_settings_rows_rebuild();
-
+// link row which opens the connection panel.
 static bool s_cfg_dirty = false;      // pending NVS write, handled off the tap path
 static lv_obj_t *s_kb = nullptr;      // keyboard overlay (nullptr when closed)
 static char s_kb_buf[20];
 static lv_obj_t *s_kb_preview = nullptr;
-static lv_obj_t *s_kb_row_handle = nullptr;
 
 static void kb_redraw_preview() {
     if (!s_kb_preview) return;
-    char line[28];
-    snprintf(line, sizeof(line), "@%s", s_kb_buf);
+    char line[48];
+    snprintf(line, sizeof(line), "#%06X name>#  @%s", (unsigned)C_GREEN, s_kb_buf);
     lv_label_set_text(s_kb_preview, line);
 }
 
@@ -1400,12 +1370,9 @@ static void kb_key_cb(lv_event_t *e) {
 
 static void kb_key(lv_obj_t *p, int x, int y, int w, int h, const char *label, char code) {
     lv_obj_t *b = obj(p, x, y, w, h);
-    lv_obj_set_style_radius(b, 3, 0);
-    lv_obj_set_style_bg_color(b, lv_color_hex(C_CARD), 0);
-    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(b, 1, 0);
     lv_obj_set_style_border_color(b, lv_color_hex(C_LINE), 0);
-    lv_obj_set_style_bg_color(b, lv_color_hex(C_PURPLE), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(b, lv_color_hex(C_GREEN), LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_STATE_PRESSED);
     lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_ext_click_area(b, 2);
@@ -1426,18 +1393,18 @@ static void kb_open() {
     if (s_kb) return;
     snprintf(s_kb_buf, sizeof(s_kb_buf), "%s", g_cfg.handle);
     s_kb = obj(lv_layer_top(), 0, 96, LCD_W, LCD_H - 96);
-    lv_obj_set_style_bg_color(s_kb, lv_color_hex(C_BG), 0);
-    lv_obj_set_style_bg_opa(s_kb, LV_OPA_COVER, 0);
+    fill(s_kb, C_BG);
     lv_obj_set_style_border_width(s_kb, 1, 0);
-    lv_obj_set_style_border_color(s_kb, lv_color_hex(C_PURPLE), 0);
+    lv_obj_set_style_border_color(s_kb, lv_color_hex(C_GREEN), 0);
     lv_obj_add_flag(s_kb, LV_OBJ_FLAG_CLICKABLE);  // swallow taps behind it
 
-    s_kb_preview = txt(s_kb, "", 10, 4, &ark16, C_TEXT);
+    s_kb_preview = txt(s_kb, "", 8, 8, &ark12, C_TEXT);
+    lv_label_set_recolor(s_kb_preview, true);
     kb_redraw_preview();
-    lv_obj_t *ok = button(s_kb, LCD_W - 96, 2, 46, "保存", C_PURPLE, C_TEXT);
+    lv_obj_t *ok = button(s_kb, LCD_W - 96, 2, 46, "保存", C_GREEN, C_BG);
     lv_obj_set_ext_click_area(ok, 2);
     lv_obj_add_event_cb(ok, [](lv_event_t *e) { kb_apply(); }, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *no = button(s_kb, LCD_W - 46, 2, 40, "取消", C_CARD, C_MUTED);
+    lv_obj_t *no = button(s_kb, LCD_W - 46, 2, 40, "取消", C_BG, C_MUTED);
     lv_obj_set_ext_click_area(no, 2);
     lv_obj_add_event_cb(no, [](lv_event_t *e) { kb_close(); }, LV_EVENT_CLICKED, NULL);
 
@@ -1456,7 +1423,7 @@ static void kb_open() {
         char lab[2] = {r4[i], 0};
         kb_key(s_kb, x0 + i * (kw + gap), 140, kw, 32, lab, r4[i]);
     }
-    kb_key(s_kb, tall_x, 32, tall_w, 68, "删", '');  // "⌫" is not in the subset font
+    kb_key(s_kb, tall_x, 32, tall_w, 68, "删", '\b');  // "⌫" is not in the subset font
     kb_key(s_kb, tall_x, 104, tall_w, 68, "清空", 0);
     lv_obj_t *clr = lv_obj_get_child(s_kb, lv_obj_get_child_cnt(s_kb) - 1);
     lv_obj_add_event_cb(clr, [](lv_event_t *e) {
@@ -1494,13 +1461,13 @@ static void link_panel_refresh() {
     char b[80];
     const char *live = gw_active_link();
     if (!strcmp(live, "-"))
-        set_txt(U.lk_state, usb ? "USB · 等待电脑端桥接" : "WiFi · 未连接");
+        set_txt(U.lk_state, usb ? "● USB · 等待电脑端桥接" : "● WiFi · 未连接");
     else
-        set_txtf(U.lk_state, "%s · 已连接", live);
+        set_txtf(U.lk_state, "● %s · 已连接", live);
     set_color(U.lk_state, strcmp(live, "-") ? C_GREEN : C_AMBER);
 
     if (usb)
-        set_txt(U.lk_addr, "电脑端跑 tools/usb_bridge.py");
+        set_txt(U.lk_addr, "$ py tools/usb_bridge.py");
     else {
         snprintf(b, sizeof(b), "网关 %s:%u", netcfg_host(), (unsigned)netcfg_port());
         set_txt(U.lk_addr, b);
@@ -1508,15 +1475,13 @@ static void link_panel_refresh() {
     if (usb)
         set_txt(U.lk_hint, "插上 USB 线就能用，不用路由器");
     else
-        set_txt(U.lk_hint, "手机连热点 magpie-dash-setup 配网");
+        set_txt(U.lk_hint, "手机连 WiFi magpie-dash-setup 配网");
 
     for (int i = 0; i < 2; i++) {
         if (!U.lk_btn[i]) continue;
         const bool sel = (i == 0) == usb;
-        lv_obj_set_style_bg_opa(U.lk_btn[i], sel ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_color(U.lk_btn[i], lv_color_hex(sel ? C_PURPLE : C_LINE), 0);
-        lv_obj_t *l = lv_obj_get_child(U.lk_btn[i], 0);
-        if (l) lv_obj_set_style_text_color(l, lv_color_hex(sel ? C_TEXT : C_MUTED), 0);
+        set_bg(U.lk_btn[i], sel ? C_GREEN : C_DIM);
+        set_color(lv_obj_get_child(U.lk_btn[i], 0), sel ? C_BG : C_MUTED);
     }
 }
 
@@ -1538,13 +1503,9 @@ static void link_mode_cb(lv_event_t *e) {
 }
 
 static void link_mode_btn(lv_obj_t *p, int x, int y, int w, const char *label, int mode) {
-    lv_obj_t *b = obj(p, x, y, w, 30);
-    lv_obj_set_style_radius(b, 4, 0);
-    lv_obj_set_style_bg_color(b, lv_color_hex(C_PURPLE), 0);
-    lv_obj_set_style_border_width(b, 1, 0);
-    lv_obj_set_style_border_color(b, lv_color_hex(C_LINE), 0);
-    lv_obj_set_style_bg_color(b, lv_color_hex(C_DIM), LV_STATE_PRESSED);
-    lv_obj_set_style_bg_opa(b, LV_OPA_COVER, LV_STATE_PRESSED);
+    lv_obj_t *b = obj(p, x, y, w, 28);
+    fill(b, C_DIM);
+    lv_obj_set_style_bg_color(b, lv_color_hex(C_LINE), LV_STATE_PRESSED);
     lv_obj_add_flag(b, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_ext_click_area(b, 3);
     lv_obj_t *l = txt(b, label, 0, 0, &ark12, C_MUTED);
@@ -1555,26 +1516,26 @@ static void link_mode_btn(lv_obj_t *p, int x, int y, int w, const char *label, i
 
 static void link_panel_open() {
     if (s_link) return;
-    s_link = obj(lv_layer_top(), 0, 46, LCD_W, LCD_H - 46);
-    lv_obj_set_style_bg_color(s_link, lv_color_hex(C_BG), 0);
-    lv_obj_set_style_bg_opa(s_link, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(s_link, 1, 0);
-    lv_obj_set_style_border_color(s_link, lv_color_hex(C_PURPLE), 0);
+    s_link = obj(lv_layer_top(), 0, PAGE_Y, LCD_W, PAGE_H);
+    fill(s_link, C_BG);
     lv_obj_add_flag(s_link, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t *c = pane(s_link, 6, 8, 468, 210, C_CYAN);
+    lv_obj_add_flag(c, LV_OBJ_FLAG_EVENT_BUBBLE);
+    pane_title(c, "连接 magpie", C_CYAN);
 
-    txt(s_link, "连接 magpie", 10, 6, &ark12, C_TEXT);
-    lv_obj_t *x = button(s_link, LCD_W - 42, 2, 36, "关闭", C_CARD, C_MUTED);
+    lv_obj_t *x = button(c, 468 - 66, 8, 56, "关闭", C_BG, C_MUTED);
     lv_obj_set_ext_click_area(x, 2);
     lv_obj_add_event_cb(x, [](lv_event_t *e) { link_panel_close(); }, LV_EVENT_CLICKED, NULL);
 
-    link_mode_btn(s_link, 10, 30, 220, "USB 一根线", 0);
-    link_mode_btn(s_link, 240, 30, 220, "WiFi 局域网", 1);
+    link_mode_btn(c, 10, 8, 160, "USB 一根线", 0);
+    link_mode_btn(c, 176, 8, 160, "WiFi 局域网", 1);
 
-    U.lk_state = txt(s_link, "--", 10, 70, &ark12, C_TEXT);
-    U.lk_addr = txt(s_link, "--", 10, 92, &ark12, C_MUTED);
-    U.lk_hint = txt(s_link, "--", 10, 110, &ark12, C_FAINT);
+    U.lk_state = txt(c, "--", 10, 52, &ark12, C_TEXT);
+    U.lk_addr = txt(c, "--", 10, 72, &ark12, C_TEXT);
+    U.lk_hint = txt(c, "--", 10, 88, &ark12, C_FAINT);
+    dline(c, 8, 112, 450);
 
-    lv_obj_t *retry = button(s_link, 10, 136, 104, "重新连接", C_CARD, C_TEXT);
+    lv_obj_t *retry = button(c, 10, 124, 104, "重新连接", C_BG, C_TEXT);
     lv_obj_set_ext_click_area(retry, 2);
     lv_obj_add_event_cb(retry, [](lv_event_t *e) {
         if (g_cfg.link_mode == 0)
@@ -1584,7 +1545,7 @@ static void link_panel_open() {
         link_panel_refresh();
     }, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *portal = button(s_link, 122, 136, 110, "WiFi 配网", C_CARD, C_TEXT);
+    lv_obj_t *portal = button(c, 122, 124, 110, "WiFi 配网", C_BG, C_TEXT);
     lv_obj_set_ext_click_area(portal, 2);
     lv_obj_add_event_cb(portal, [](lv_event_t *e) {
         netcfg_set_mode(1);
@@ -1599,25 +1560,23 @@ static void link_panel_open() {
 
 static void build_settings() {
     lv_obj_t *p = pg[PG_SETTINGS] = make_page();
-    home_btn(p);
-    tabs(p, 4, PG_SETTINGS);  // same chrome as every other page
 
-    // Same card + divider rhythm as the agent list, so the page does not look
-    // like a different app: six 36 px rows inside one 468x220 card.
-    lv_obj_t *c = card(p, 6, 46, 468, 220);
-    static const char *labels[5] = {"显示名称", "用量显示", "刷新间隔", "头像动效", "隐藏金额"};
+    lv_obj_t *c = pane(p, 6, 8, 468, 210);
+    pane_title(c, "config", C_MUTED);
+    static const char *labels[6] = {"显示名称", "用量显示", "刷新间隔", "头像动效", "隐藏金额", "连接 magpie"};
     for (int i = 0; i < 6; i++) {
-        lv_obj_t *r = obj(c, 0, i * 36, 466, 36);
-        lv_obj_set_style_border_width(r, 1, 0);
-        lv_obj_set_style_border_side(r, LV_BORDER_SIDE_BOTTOM, 0);
-        lv_obj_set_style_border_color(r, lv_color_hex(C_DIM), 0);
+        lv_obj_t *r = U.set_row[i] = obj(c, 1, 3 + i * 34, 466, 34);
+        if (i < 5) {
+            lv_obj_set_style_border_width(r, 1, 0);
+            lv_obj_set_style_border_side(r, LV_BORDER_SIDE_BOTTOM, 0);
+            lv_obj_set_style_border_color(r, lv_color_hex(C_DIM), 0);
+        }
+        lv_obj_set_style_bg_color(r, lv_color_hex(C_DIM), LV_STATE_PRESSED);
+        lv_obj_set_style_bg_opa(r, LV_OPA_COVER, LV_STATE_PRESSED);
         lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE);
-        lv_obj_set_ext_click_area(r, 0);  // the row already spans the full width
-        const char *name = (i == 5) ? "连接 magpie" : labels[i];
-        txt(r, name, 10, 10, &ark12, C_MUTED);
-        lv_obj_t *v = txt(r, "--", 0, 9, &ark12, C_TEXT);
-        lv_obj_align(v, LV_ALIGN_TOP_RIGHT, -12, 9);
-        U.set_val[i] = v;
+        txt(r, labels[i], 10, 11, &ark12, C_MUTED);
+        U.set_val[i] = txt_r(r, "--", 440, 11, 260, &ark12, C_TEXT);
+        txt(r, "»", 448, 11, &ark12, C_FAINT);
         if (i == 0)
             lv_obj_add_event_cb(r, row_name_cb, LV_EVENT_CLICKED, NULL);
         else if (i == 5)
@@ -1634,12 +1593,30 @@ bool ui_cfg_take_dirty() {
     return d;
 }
 
+// the top bar's link indicator: the pipe that is really carrying data
+static void chrome_status() {
+    if (!U.tb_right) return;
+    const char *live = gw_active_link();
+    const bool up = strcmp(live, "-") != 0;
+    char clock[24] = "";
+    const time_t now = time(nullptr);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    static const char *wd[7] = {"周日", "周一", "周二", "周三", "周四", "周五", "周六"};
+    if (tmv.tm_year > 120)
+        snprintf(clock, sizeof(clock), "%d/%d %s %02d:%02d", tmv.tm_mon + 1, tmv.tm_mday,
+                 wd[tmv.tm_wday], tmv.tm_hour, tmv.tm_min);
+    else
+        snprintf(clock, sizeof(clock), "--:--");
+    set_txtf(U.tb_right, "#%06X ●# %s   #%06X %s#", (unsigned)(up ? C_GREEN : C_AMBER),
+             up ? (strcmp(live, "USB") ? "wifi" : "usb") : "offline", (unsigned)C_TEXT, clock);
+}
+
 void ui_settings_refresh() {
     if (!U.set_val[0]) return;
     char b[40];
     snprintf(b, sizeof(b), "@%s", g_cfg.handle);
     set_txt(U.set_val[0], b);
-    if (U.hm_handle) set_txt(U.hm_handle, b);
     set_txt(U.set_val[1], g_cfg.quota_mode ? "已用" : "剩余");
     snprintf(b, sizeof(b), "%u 秒", (unsigned)g_cfg.refresh_s);
     set_txt(U.set_val[2], b);
@@ -1653,10 +1630,9 @@ void ui_settings_refresh() {
         else if (!strcmp(live, "WiFi")) set_txt(U.set_val[5], "WiFi · 已连接");
         else set_txt(U.set_val[5], g_cfg.link_mode ? "WiFi · 未连接" : "USB · 未连接");
     }
+    chrome_prompt();  // the prompt carries the handle
+    chrome_status();
     link_panel_refresh();
-    // quota wording follows the setting
-    for (int i = 0; i < QUOTA_MAX_PROV; i++)
-        if (U.q_word[i]) set_txt(U.q_word[i], g_cfg.quota_mode ? "已用" : "剩余");
 }
 
 
@@ -1682,6 +1658,21 @@ void ui_settings_keyboard(bool on) {
     for (int i = 0; i < 4; i++) { lv_timer_handler(); delay(20); }
 }
 
+// centre of an object in screen coordinates (taps follow the layout)
+static void obj_center(lv_obj_t *o, int *x, int *y) {
+    lv_obj_update_layout(lv_scr_act());
+    lv_area_t a;
+    lv_obj_get_coords(o, &a);
+    *x = (a.x1 + a.x2) / 2;
+    *y = (a.y1 + a.y2) / 2;
+}
+
+static void tap_obj(lv_obj_t *o) {
+    int x, y;
+    obj_center(o, &x, &y);
+    display_test_tap(x, y);
+}
+
 // ------------------------------------------------------------------ settings self-test
 // Real indev taps (not direct calls), so a hit-area or layering mistake shows up
 // the same way it would under a finger. Serial 'Z'.
@@ -1694,7 +1685,7 @@ void ui_settings_test() {
     ui_goto(PG_SETTINGS);
     for (int i = 0; i < 6; i++) { lv_timer_handler(); delay(20); }
 
-    display_test_tap(200, 63);  // row 0: 显示名称
+    tap_obj(U.set_row[0]);  // 显示名称
     for (int i = 0; i < 6; i++) { lv_timer_handler(); delay(20); }
     cases++;
     bool pass = s_kb != nullptr;
@@ -1718,8 +1709,8 @@ void ui_settings_test() {
     Serial.printf("[settest] %s saved=@%s closed=%d\n", pass ? "PASS" : "FAIL", g_cfg.handle,
                   (int)(s_kb == nullptr));
 
-    display_test_tap(200, 99);   // 用量显示
-    display_test_tap(200, 135);  // 刷新间隔
+    tap_obj(U.set_row[1]);  // 用量显示
+    tap_obj(U.set_row[2]);  // 刷新间隔
     for (int i = 0; i < 6; i++) { lv_timer_handler(); delay(20); }
     cases++;
     pass = g_cfg.quota_mode != q0 && g_cfg.refresh_s != r0;
@@ -1728,13 +1719,13 @@ void ui_settings_test() {
                   (unsigned)g_cfg.quota_mode, (unsigned)g_cfg.refresh_s);
 
     cases++;
-    pass = U.hm_handle && strstr(lv_label_get_text(U.hm_handle), g_cfg.handle) != nullptr;
+    pass = U.tb_prompt && strstr(lv_label_get_text(U.tb_prompt), g_cfg.handle) != nullptr;
     if (!pass) failed++;
     Serial.printf("[settest] %s header=%s\n", pass ? "PASS" : "FAIL",
-                  U.hm_handle ? lv_label_get_text(U.hm_handle) : "-");
+                  U.tb_prompt ? lv_label_get_text(U.tb_prompt) : "-");
 
     // the link row must open the connection panel, not just fire a refresh
-    display_test_tap(200, 244);  // row 5: 连接 magpie
+    tap_obj(U.set_row[5]);  // 连接 magpie
     for (int i = 0; i < 8; i++) { lv_timer_handler(); delay(20); }
     cases++;
     pass = s_link != nullptr;
@@ -1765,8 +1756,8 @@ static bool s_ui_ready = false;  // false during the initial page build
 void ui_init() {
     assets_init();
     lv_disp_t *d = lv_disp_get_default();
-    lv_theme_t *th = lv_theme_default_init(d, lv_palette_main(LV_PALETTE_BLUE),
-                                           lv_palette_main(LV_PALETTE_RED), false, &ark12);
+    lv_theme_t *th = lv_theme_default_init(d, lv_palette_main(LV_PALETTE_GREEN),
+                                           lv_palette_main(LV_PALETTE_RED), true, &ark12);
     lv_disp_set_theme(d, th);
     lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(C_BG), 0);
 
@@ -1777,8 +1768,9 @@ void ui_init() {
     build_agents();
     build_quota();
     build_usage();
-    build_routes(PG_ROUTES, 2);
-    build_routes(PG_ROUTES_LIST, RT_ROWS);
+    build_routes(PG_ROUTES);
+    build_routes(PG_ROUTES_LIST);
+    build_chrome();  // after the pages: drawn on top of them
     build_settings();
 
     // typing dots of whichever avatar is on screen
@@ -1806,8 +1798,8 @@ static uint32_t s_last_page_ms = 0;
 static int s_pending_page = -1;
 static uint32_t s_pending_ms = 0;
 
-// Show/hide the pages and paint once. This is the expensive step (50-65 ms on
-// this panel), so it must not run once per tap in a burst of taps.
+// Show/hide the pages and paint once. Only the page band (480x226) and the two
+// chrome strips that change are repainted, never the whole panel.
 static void apply_page(int page) {
     if (page < 0) page = 0;
     s_pending_page = -1;  // this paint supersedes anything queued: without this a
@@ -1824,9 +1816,10 @@ static void apply_page(int page) {
         else
             lv_obj_add_flag(pg[i], LV_OBJ_FLAG_HIDDEN);
     }
+    chrome_prompt();
+    chrome_tabs();
     if (s_ui_ready && prev != s_page) {
         const uint32_t t0 = millis();
-        lv_obj_invalidate(lv_scr_act());
         lv_refr_now(NULL);
         if (dbg_verbose) Serial.printf("[ui] page %d painted %u ms\n", s_page, (unsigned)(millis() - t0));
     }
@@ -1837,7 +1830,7 @@ static void apply_page(int page) {
 // Tap path. A lone tap paints at once (feels immediate); taps that arrive within
 // PAGE_COALESCE_MS of the previous paint only record the newest target, so four
 // quick tab taps paint the fourth page once instead of painting four pages
-// 50-65 ms apart and falling further behind the finger with every tap.
+// one after another and falling further behind the finger with every tap.
 #define PAGE_COALESCE_MS 150
 
 static void page_request(int page) {
@@ -1870,7 +1863,7 @@ void ui_page_settle() {
 
 void ui_tap_page(int page) { page_request(page); }
 
-// Programmatic switches (serial 0..8, init, debug) stay synchronous so a
+// Programmatic switches (serial 0..9, init, debug) stay synchronous so a
 // following lv_refr_now()/capture always sees the requested page.
 static void close_overlays() {
     link_panel_close();
@@ -1904,18 +1897,15 @@ lv_obj_t *ui_page_obj(int page) {
 }
 
 void ui_tick() {
-    // clock
-    time_t now = time(nullptr);
-    struct tm tmv;
-    localtime_r(&now, &tmv);
-    static const char *wd[7] = {"周日", "周一", "周二", "周三", "周四", "周五", "周六"};
-    if (tmv.tm_year > 120) {
-        set_txtf(U.date, "%d/%d %s", tmv.tm_mon + 1, tmv.tm_mday, wd[tmv.tm_wday]);
-        set_txtf(U.clock, "%02d %02d", tmv.tm_hour, tmv.tm_min);
-    }
-    // the live dot on the home card blinks while the agent is at work
+    chrome_status();
+    // 1 Hz blink: the prompt cursor, the state page cursor, and the live dots
     static bool blink = false;
     blink = !blink;
+    lv_obj_set_style_bg_opa(U.tb_cursor, blink ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    if (s_page >= PG_STATE_THINK && s_page <= PG_STATE_CONFIRM) {
+        lv_obj_t *c = U.st_cursor[s_page - PG_STATE_THINK];
+        lv_obj_set_style_bg_opa(c, blink ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    }
     for (int i = 0; i < AG_ROWS; i++) {
         if (!U.ag_live[i] || lv_obj_has_flag(U.ag_live[i], LV_OBJ_FLAG_HIDDEN)) continue;
         lv_obj_set_style_bg_opa(U.ag_live[i], blink ? LV_OPA_COVER : LV_OPA_40, 0);
@@ -2031,6 +2021,15 @@ static bool agent_live(const AgentRow *a) {
     return a && a->last && now > 1700000000 && now - (time_t)a->last < 120;
 }
 
+static void fmt_cost(lv_obj_t *l, float cost) {
+    if (g_cfg.privacy)
+        set_txt(l, "$••");
+    else if (cost < 10)
+        set_txtf(l, "$%.2f", cost);
+    else
+        set_txtf(l, "$%.0f", cost);
+}
+
 static void sheet_fill() {
     if (!U.sh || !U.sh_id[0]) return;
     const char *id = U.sh_id;
@@ -2039,26 +2038,22 @@ static void sheet_fill() {
     const AgentRow *a = s_data ? agent_stat(*s_data, id) : nullptr;
     const RouteRow *r = s_data ? focus_row(*s_data, id) : nullptr;
     char b[32];
-    set_txt_fit(U.sh_name, agent_label(id, a ? a->name : ""));
+    set_txt(U.sh_name, agent_label(id, a ? a->name : ""));
     const char *model = a && a->model[0] ? a->model : (r ? r->model : "");
-    set_txtf(U.sh_model, "%s  ·  %s", id, model[0] ? model : "默认模型");
+    set_txtf(U.sh_model, "%s · %s", id, model[0] ? model : "默认模型");
     set_txt(U.sh_num[0], a ? fmt_count(a->calls, b, sizeof(b)) : "0");
     set_txt(U.sh_num[1], a ? fmt_count(a->today, b, sizeof(b)) : "0");
     set_txt(U.sh_num[2], a ? fmt_count((uint64_t)a->tokens, b, sizeof(b)) : "0");
-    if (a && a->cost >= 10)
-        set_txtf(U.sh_num[3], "$%.0f", a->cost);
-    else
-        if (g_cfg.privacy) set_txt(U.sh_num[3], "$--");
-        else set_txtf(U.sh_num[3], "$%.2f", a ? a->cost : 0.0f);
+    fmt_cost(U.sh_num[3], a ? a->cost : 0.0f);
     uint32_t total = 0;
     for (int i = 0; s_data && i < s_data->nagents; i++) total += s_data->agents[i].calls;
     const float share = total && a ? 100.0f * a->calls / total : 0;
     set_txtf(U.sh_share, "占全部调用 %.0f%%", share);
-    segbar_set(U.sh_bar, share, sk->accent);
+    tbar_set(U.sh_bar, share, sk->accent);
     const bool live = agent_live(a);
     avatar_mode(s_av_sheet, live ? AV_THINK : AV_IDLE);
     if (live)
-        set_txt(U.sh_last, "工作中");
+        set_txt(U.sh_last, "● 工作中");
     else if (a && a->last)
         set_txtf(U.sh_last, "最近 %s", fmt_ago(a->last, b, sizeof(b)));
     else
@@ -2066,12 +2061,9 @@ static void sheet_fill() {
     set_color(U.sh_last, live ? C_GREEN : C_MUTED);
     const bool following = s_focus[0] && !strcmp(s_focus, id);
     set_txt(lv_obj_get_child(U.sh_follow, 0), following ? "取消跟随" : "跟随");
-    lv_obj_set_style_bg_color(U.sh_follow, lv_color_hex(following ? C_DIM : sk->accent), 0);
-    lv_obj_set_style_border_color(U.sh_follow, lv_color_hex(following ? C_LINE : sk->accent), 0);
-    // light accents (Grok, Cursor, Pi...) need dark text on the button
-    const uint32_t ac = sk->accent;
-    const int lum = ((ac >> 16) & 0xFF) * 3 + ((ac >> 8) & 0xFF) * 6 + (ac & 0xFF);
-    set_color(lv_obj_get_child(U.sh_follow, 0), !following && lum > 1800 ? C_BG : C_TEXT);
+    set_bg(U.sh_follow, following ? C_DIM : C_CYAN);
+    lv_obj_set_style_border_color(U.sh_follow, lv_color_hex(following ? C_LINE : C_CYAN), 0);
+    set_color(lv_obj_get_child(U.sh_follow, 0), following ? C_TEXT : C_BG);
 }
 
 static void tag_for(const RouteRow &r, char *buf, size_t n, uint32_t *col) {
@@ -2080,10 +2072,10 @@ static void tag_for(const RouteRow &r, char *buf, size_t n, uint32_t *col) {
         *col = C_RED;
     } else if (!strcmp(r.stop, "tool_calls") || !strcmp(r.stop, "tool_use")) {
         snprintf(buf, n, "工具调用");
-        *col = C_PURPLE;
+        *col = C_AMBER;
     } else {
         snprintf(buf, n, "回复");
-        *col = C_MUTED;
+        *col = C_GREEN;
     }
 }
 
@@ -2112,7 +2104,7 @@ static inline float q_show(const QuotaWindow *w) {
 
 void ui_update(const DashData &d) {
     s_data = &d;
-    char nb[24], nb2[24], lb[40];
+    char nb[24], nb2[24], lb[48];
 
     const char *fid = focus_id(d);
     const AgentSkin *sk = skin_for(fid);
@@ -2121,9 +2113,12 @@ void ui_update(const DashData &d) {
     const QuotaProvider *fq = focus_quota(d, frow);
     const QuotaWindow *w0 = fq && fq->nwin > 0 ? &fq->win[0] : nullptr;
     const QuotaWindow *w1 = fq && fq->nwin > 1 ? &fq->win[1] : nullptr;
-    char upper[24];
-    snprintf(upper, sizeof(upper), "%s", fname);
-    for (char *c = upper; *c; c++) *c = (char)toupper((unsigned char)*c);
+    const QuotaWindow *wr = w1 ? w1 : w0;  // the longer window decides the reset line
+    char reset[40] = "";
+    if (wr) {
+        fmt_countdown((time_t)wr->reset_at, reset, sizeof(reset));
+        if (!reset[0]) snprintf(reset, sizeof(reset), "%s", wr->reset);
+    }
 
     // a new agent took over: everyone hops and it says hello
     static char last_fid[16] = "";
@@ -2131,10 +2126,13 @@ void ui_update(const DashData &d) {
     strncpy(last_fid, fid, sizeof(last_fid) - 1);
     const AgentRow *fst = agent_stat(d, fid);
     const bool live = agent_live(fst);
+    const bool tool = frow && (!strcmp(frow->stop, "tool_calls") || !strcmp(frow->stop, "tool_use"));
+
+    // -------------------------------------------------- chrome
+    chrome_status();
 
     // -------------------------------------------------- home
-    lv_obj_set_style_bg_color(U.hm_accent, lv_color_hex(sk->accent), 0);
-    lv_obj_set_style_bg_color(U.hm_dot, lv_color_hex(live ? C_GREEN : sk->accent), 0);
+    set_bg(U.hm_dot, !d.gw ? C_FAINT : (live ? C_GREEN : C_MUTED));
     avatar_set(s_av_home, sk);
     avatar_mode(s_av_home, live ? AV_THINK : AV_IDLE);
     static bool prev_live = false;
@@ -2148,8 +2146,11 @@ void ui_update(const DashData &d) {
         avatar_hop(s_av_home);
         avatar_say(s_av_home, sk->say[0], 2500);
     }
-    set_txt_fit(U.hm_name, fname);
-    const bool tool = frow && (!strcmp(frow->stop, "tool_calls") || !strcmp(frow->stop, "tool_use"));
+    set_txt(U.hm_name, fname);
+    {
+        const char *model = fst && fst->model[0] ? fst->model : (frow ? frow->model : "");
+        set_txtf(U.hm_sub, "%s%s%s", fid, model[0] ? " · " : "", model);
+    }
     if (!d.gw)
         set_txt(U.hm_state, "等待网关");
     else if (live)
@@ -2160,42 +2161,52 @@ void ui_update(const DashData &d) {
         set_txtf(U.hm_state, "最近 %s", frow->time);
     else
         set_txt(U.hm_state, "空闲");
-    if (fst && fst->calls)
-        set_txtf(U.hm_stats, "今天 %s 次 · 30 天 %s 次", fmt_count(fst->today, nb, sizeof(nb)),
-                 fmt_count(fst->calls, nb2, sizeof(nb2)));
-    else
-        set_txt(U.hm_stats, "最近 30 天未使用");
-    if (w0) {
-        win_short(w0->name, lb, sizeof(lb), false);  // no room for "Gemini" before the bar
-        set_txt(U.hm_qlbl, lb);
-        set_txtf(U.hm_pct, "%.0f%%", q_show(w0));
-        set_color(U.hm_pct, remain_col(w0->remaining));
-        segbar_set(U.hm_bar, q_show(w0), remain_col(w0->remaining));
-    } else {
-        set_txt(U.hm_pct, "--");
-        segbar_set(U.hm_bar, 0);
+    set_color(U.hm_state, live ? C_GREEN : C_MUTED);
+    const QuotaWindow *hw[2] = {w0, w1};
+    for (int k = 0; k < 2; k++) {
+        show(U.hm_qk[k], hw[k] || k == 0);
+        show(U.hm_qbar[k], hw[k] || k == 0);
+        show(U.hm_qpct[k], hw[k] || k == 0);
+        if (!hw[k]) {
+            set_txt(U.hm_qpct[k], "--");
+            tbar_set(U.hm_qbar[k], 0, C_GREEN);
+            continue;
+        }
+        win_short(hw[k]->name, lb, sizeof(lb), false);  // no room for "Gemini" before the bar
+        set_txt(U.hm_qk[k], lb);
+        set_txtf(U.hm_qpct[k], "%.0f%%", q_show(hw[k]));
+        set_color(U.hm_qpct[k], remain_col(hw[k]->remaining));
+        tbar_set(U.hm_qbar[k], q_show(hw[k]), remain_col(hw[k]->remaining));
     }
-    set_txtf(U.hm_mag, "今天 %u 次 · %s", (unsigned)d.today_calls,
-             fmt_count((uint64_t)d.today_tokens, nb, sizeof(nb)));
-    // hour tick strip: how far the day has gone (design's "today" timeline)
-    time_t now2 = time(nullptr);
-    struct tm tmv2;
-    localtime_r(&now2, &tmv2);
-    float daypct = tmv2.tm_year > 120 ? (tmv2.tm_hour * 60 + tmv2.tm_min) / 14.4f : 0.0f;
-    segbar_set(U.hm_tick, daypct);
+    set_txtf(U.hm_today, "%s 次", fst ? fmt_count(fst->today, nb, sizeof(nb)) : "0");
+    set_txtf(U.hm_30d, "%s 次", fst ? fmt_count(fst->calls, nb, sizeof(nb)) : "0");
+    set_txt(U.hm_reset, reset);
+
+    set_txt(U.mg_state, d.gw ? "● online" : "● offline");
+    set_color(U.mg_state, d.gw ? C_GREEN : C_FAINT);
+    set_txtf(U.mg_calls, "%u", (unsigned)d.today_calls);
+    set_txt(U.mg_tok, fmt_count((uint64_t)d.today_tokens, nb, sizeof(nb)));
+    set_txtf(U.mg_costk, "费用 %s", d.period);
+    fmt_cost(U.mg_cost, d.cost);
+    set_txtf(U.mg_sess, "%d", d.sessions);
+    set_txt(U.mg_last, d.nrows ? d.rows[0].time : "--");
+    set_txtf(U.mg_cap, "token / %s", d.period);
+    {
+        const int slot = bars_fill(U.mg_bars, d, 10, 210, 200, 50);
+        float mx = 0;
+        for (int i = 0; i < d.nseries; i++)
+            if (d.series[i].tokens > mx) mx = d.series[i].tokens;
+        set_txtf(U.mg_max, "%s", mx > 0 ? fmt_count((uint64_t)mx, nb, sizeof(nb)) : "");
+        show(U.mg_empty, slot == 0);
+    }
 
     // -------------------------------------------------- state pages
     for (int i = 0; i < 3; i++) {
         avatar_set(s_av_state[i], sk);
         if (switched) avatar_hop(s_av_state[i]);
-        for (int k = 0; k < 3; k++)
-            lv_obj_set_style_bg_color(U.st_pip[i][k], lv_color_hex(k == i ? sk->accent : C_DIM), 0);
-
-        set_txt(U.st_agent[i], upper);
-        set_color(U.st_agent[i], sk->accent);
-        set_color(U.st_star[i], sk->accent);
-        set_color(U.st_title[i], sk->accent);
-        set_txt(U.st_title[i], i == 0 ? "斟酌中" : (i == 1 ? "编写代码" : "等你确认"));
+        for (int k = 0; k < 3; k++) set_bg(U.st_pip[i][k], k == i ? sk->accent : C_DIM);
+        set_txt(U.st_name[i], fname);
+        set_txt(U.st_title_l[i], fid);
         set_txtf(U.st_sess[i], "%d 个会话", d.sessions);
         if (frow) {
             if (i == 0)
@@ -2213,10 +2224,10 @@ void ui_update(const DashData &d) {
             set_txt(U.st_l5[i], lb);
             set_txtf(U.st_p5[i], "%.0f%%", q_show(w0));
             set_color(U.st_p5[i], remain_col(w0->remaining));
-            segbar_set(U.st_bar5[i], q_show(w0), remain_col(w0->remaining));
+            tbar_set(U.st_bar5[i], q_show(w0), remain_col(w0->remaining));
         } else {
             set_txt(U.st_p5[i], "--");
-            segbar_set(U.st_bar5[i], 0);
+            tbar_set(U.st_bar5[i], 0, C_GREEN);
         }
         show(U.st_l7[i], w1 != nullptr);
         show(U.st_p7[i], w1 != nullptr);
@@ -2226,28 +2237,22 @@ void ui_update(const DashData &d) {
             set_txt(U.st_l7[i], lb);
             set_txtf(U.st_p7[i], "%.0f%%", q_show(w1));
             set_color(U.st_p7[i], remain_col(w1->remaining));
-            segbar_set(U.st_bar7[i], q_show(w1), remain_col(w1->remaining));
+            tbar_set(U.st_bar7[i], q_show(w1), remain_col(w1->remaining));
         }
-        const QuotaWindow *wr = w1 ? w1 : w0;
-        if (wr) {
-            char cd[40];
-            fmt_countdown((time_t)wr->reset_at, cd, sizeof(cd));
-            set_txt(U.st_reset[i], cd[0] ? cd : wr->reset);
-        } else {
-            set_txt(U.st_reset[i], "");
-        }
+        set_txt(U.st_reset[i], reset[0] ? reset : "");
         if (fq)
             set_txtf(U.st_src[i], "额度来源 %s · %s", fq->name, fq->plan);
         else
             set_txt(U.st_src[i], "");
         set_txt(U.st_conn[i], d.gw ? "已连接" : "未连接");
+        set_color(U.st_conn[i], d.gw ? C_GREEN : C_MUTED);
+        set_bg(U.st_conn_dot[i], d.gw ? C_GREEN : C_FAINT);
     }
 
     // -------------------------------------------------- agents
     static AgentView views[AG_ROWS];
     const int nv = agent_views(d, views, AG_ROWS);
-    for (int pgid = 0; pgid < UI_PAGES; pgid++)
-        if (U.ag_tab[pgid]) set_txt(U.ag_tab[pgid], "Agent");  // count lives in the list
+    set_txtf(U.ag_count, "%d 个", nv);
     for (int i = 0; i < AG_ROWS; i++) {
         show(U.ag_row[i], i < nv);
         if (i >= nv) {
@@ -2275,18 +2280,18 @@ void ui_update(const DashData &d) {
             set_txt(U.ag_state[i], "未使用");
             set_color(U.ag_state[i], C_FAINT);
         }
-        set_txt_fit(U.ag_name[i], agent_label(v.id, v.name));
+        set_txt(U.ag_name[i], agent_label(v.id, v.name));
         set_color(U.ag_name[i], v.calls ? C_TEXT : C_MUTED);
         set_txt(U.ag_detail[i], v.model[0] ? v.model : "默认模型");
         if (v.calls) {
-            set_txtf(U.ag_calls[i], "%s 次", fmt_count(v.calls, nb, sizeof(nb)));
+            set_txt(U.ag_calls[i], fmt_count(v.calls, nb, sizeof(nb)));
             set_color(U.ag_calls[i], C_GREEN);
         } else {
-            set_txt(U.ag_calls[i], "未使用");
+            set_txt(U.ag_calls[i], "-");
             set_color(U.ag_calls[i], C_FAINT);
         }
         const bool pinned = s_focus[0] && !strcmp(s_focus, v.id);
-        lv_obj_set_style_bg_color(U.ag_row[i], lv_color_hex(C_DIM), 0);
+        set_bg(U.ag_row[i], C_DIM);
         lv_obj_set_style_bg_opa(U.ag_row[i], pinned ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
     }
 
@@ -2298,109 +2303,88 @@ void ui_update(const DashData &d) {
         const QuotaProvider *q = i < d.nprov ? &d.prov[i] : nullptr;
         show(U.q_blk[i], q != nullptr);
         if (!q) continue;
-        snprintf(lb, sizeof(lb), "%s", q->name);
-        for (char *c = lb; *c; c++) *c = (char)toupper((unsigned char)*c);
-        set_txt(U.q_name[i], lb);
-        const char *pid = !strcmp(q->provider, "antigravity") ? "agy" : q->provider;
-        lv_obj_set_style_bg_color(U.q_dot[i], lv_color_hex(skin_for(pid)->accent), 0);
-        set_txt(U.q_plan[i], q->plan);
+        const int lines = q->nwin ? q->nwin : 1;
+        lv_obj_set_height(U.q_pane[i], 12 + lines * QL_STEP);
+        lv_obj_set_height(U.q_blk[i], 6 + 12 + lines * QL_STEP);
+        snprintf(lb, sizeof(lb), "%s · %s", q->name, q->plan);
+        set_txt(U.q_name[i], q->plan[0] ? lb : q->name);
         char acct[48];
         mask_account(q->user, acct, sizeof(acct));
-        set_txt_fit(U.q_user[i], acct[0] ? acct : q->name);
-        const char *rs = q->nwin ? q->win[0].reset : "";
-        if (*rs)
-            set_txtf(U.q_reset[i], "↻ %s", rs);
-        else if (q->lastServed[0])
-            set_txtf(U.q_reset[i], "最近 %s", q->lastServed);
-        else
-            set_txt(U.q_reset[i], "");
+        set_txt(U.q_user[i], acct);
+        show(U.q_user[i], acct[0] != 0);  // an empty title would still cut the border
         for (int j = 0; j < QUOTA_MAX_WIN; j++) {
             const bool has = j < q->nwin;
-            show(U.q_ring[i][j], has);
-            show(U.q_win[i][j], has);
-            if (!has) continue;
-            // right-aligned: the last window sits in the rightmost slot
-            const int slot = QUOTA_MAX_WIN - q->nwin + j;
-            const int x = 466 - 10 - (QUOTA_MAX_WIN - slot) * 54 + 6;
-            lv_obj_set_x(U.q_ring[i][j], x);
-            lv_obj_set_x(U.q_win[i][j], x - 5);
+            show(U.q_key[i][j], has || (j == 0 && !q->nwin));
+            show(U.q_bar[i][j], has);
+            show(U.q_pct[i][j], has);
+            show(U.q_rst[i][j], has);
+            if (!has) {
+                if (j == 0 && !q->nwin) {
+                    set_txtf(U.q_key[i][j], "最近 %s", q->lastServed[0] ? q->lastServed : "--");
+                    lv_obj_set_width(U.q_key[i][j], 440);
+                }
+                continue;
+            }
+            lv_obj_set_width(U.q_key[i][j], 96);
             const float rem = q->win[j].remaining;
             const float shown = q_show(&q->win[j]);
-            lv_arc_set_value(U.q_ring[i][j], (int)(shown + 0.5f));
-            lv_obj_set_style_arc_color(U.q_ring[i][j], lv_color_hex(remain_col(rem)),
-                                       LV_PART_INDICATOR);
-            set_txtf(U.q_pct[i][j], "%.0f%%", shown);
             win_short(q->win[j].name, lb, sizeof(lb));
-            set_txt(U.q_win[i][j], lb);
+            set_txt(U.q_key[i][j], lb);
+            tbar_set(U.q_bar[i][j], shown, remain_col(rem));
+            set_txtf(U.q_pct[i][j], "%.0f%%", shown);
+            set_color(U.q_pct[i][j], remain_col(rem));
+            set_txt(U.q_rst[i][j], q->win[j].reset);
         }
     }
 
     // -------------------------------------------------- usage
     char b1[24], b2[24], b3[24];
     set_txt(U.u_tok, fmt_count(d.tok_in + d.tok_out + d.tok_cache, b1, sizeof(b1)));
-    set_txtf(U.u_in, "输入 %s", fmt_count(d.tok_in, b1, sizeof(b1)));
-    set_txtf(U.u_out, "输出 %s", fmt_count(d.tok_out, b2, sizeof(b2)));
-    set_txtf(U.u_cache, "缓存 %s", fmt_count(d.tok_cache, b3, sizeof(b3)));
+    set_txtf(U.u_in, "in    %s", fmt_count(d.tok_in, b1, sizeof(b1)));
+    set_txtf(U.u_out, "out   %s", fmt_count(d.tok_out, b2, sizeof(b2)));
+    set_txtf(U.u_cache, "cache %s", fmt_count(d.tok_cache, b3, sizeof(b3)));
     set_txtf(U.u_calls, "%u", (unsigned)d.calls);
     set_txtf(U.u_err, "%u 次失败", (unsigned)d.errors);
     set_color(U.u_err, d.errors ? C_RED : C_MUTED);
-    // the cost card's subtitle was a dangling label: show what a call costs on
-    // average for the selected window instead.
+    // the cost pane's subtitle: what a call costs on average for this window
     if (g_cfg.privacy || d.calls == 0)
-        set_txt(U.u_price, g_cfg.privacy ? "" : "");
+        set_txt(U.u_price, "");
     else
-        set_txtf(U.u_price, "均价 $%.4f/次", d.cost / (float)d.calls);
-    if (g_cfg.privacy)
-        set_txt(U.u_cost, "$--");
-    else if (d.cost < 10)
-        set_txtf(U.u_cost, "$%.2f", d.cost);
-    else
-        set_txtf(U.u_cost, "$%.0f", d.cost);
+        set_txtf(U.u_price, "均价 $%.4f", d.cost / (float)d.calls);
+    fmt_cost(U.u_cost, d.cost);
     set_txtf(U.u_hit, "%.0f%%", d.hit_rate());
     {
         const int n = d.nseries;
+        const int slot = bars_fill(U.u_bars, d, CH_X0, CH_W, CH_BASE, CH_H);
         float mx = 0;
         for (int i = 0; i < n; i++)
             if (d.series[i].tokens > mx) mx = d.series[i].tokens;
-        show(U.u_empty, mx <= 0);
+        show(U.u_empty, slot == 0);
         set_txt(U.u_ymax, mx > 0 ? fmt_count((uint64_t)mx, b1, sizeof(b1)) : "");
-        const int slot = n ? CH_W / n : CH_W;
         const int bw = slot > 4 ? slot - 2 : (slot > 1 ? slot - 1 : 1);
-        for (int i = 0; i < SERIES_MAX; i++) {
-            // Empty buckets must not draw a 2 px stub: a row of stubs reads as a
-            // broken dashed baseline instead of "no usage".
-            show(U.u_bars[i], i < n && mx > 0 && d.series[i].tokens > 0);
-            if (i >= n || mx <= 0 || d.series[i].tokens <= 0) continue;
-            int h = (int)(d.series[i].tokens / mx * CH_H + 0.5f);
-            if (h < 2) h = 2;
-            lv_obj_set_pos(U.u_bars[i], CH_X0 + i * slot, CH_BASE - h);
-            lv_obj_set_size(U.u_bars[i], bw, h);
-            // the latest bucket stands out, older ones step back
-            lv_obj_set_style_bg_opa(U.u_bars[i], i == n - 1 ? LV_OPA_COVER : LV_OPA_80, 0);
-        }
         for (int k = 0; k < 5; k++) {
-            show(U.u_lbl[k], n > 0);
-            if (!n) continue;
+            show(U.u_lbl[k], n > 0 && slot > 0);
+            if (!n || !slot) continue;
             const int src = n == 1 ? 0 : k * (n - 1) / 4;
             chart_label(d.series[src].label, lb, sizeof(lb));
             set_txt(U.u_lbl[k], lb);
             int cx = CH_X0 + src * slot + bw / 2 - 20;
-            if (cx > LCD_W - 50) cx = LCD_W - 50;
+            if (cx > LCD_W - 52) cx = LCD_W - 52;
             lv_obj_set_x(U.u_lbl[k], cx);
         }
     }
 
     // -------------------------------------------------- routes
     for (int pg_i = 0; pg_i < 2; pg_i++) {
-        const int maxrows = pg_i == 0 ? 2 : RT_ROWS;  // detail page scrolls through all
         show(U.r_empty[pg_i], d.nrows == 0);
-        for (int i = 0; i < maxrows; i++) {
+        set_txtf(U.r_count[pg_i], "%d 条", d.nrows);
+        for (int i = 0; i < RT_ROWS; i++) {
             const bool has = i < d.nrows;
             show(U.r_row[pg_i][i], has);
             if (!has) continue;
             const RouteRow &r = d.rows[i];
             logo_set(U.r_icon[pg_i][i], skin_for(r.agent)->s);
-            set_txt_fit(U.r_agent[pg_i][i], agent_label(r.agent, r.agentName));
+            set_txt(U.r_agent[pg_i][i], agent_label(r.agent, r.agentName));
             set_txt(U.r_model[pg_i][i], r.model[0] ? r.model : "--");
             uint32_t tc;
             tag_for(r, lb, sizeof(lb), &tc);
@@ -2412,7 +2396,7 @@ void ui_update(const DashData &d) {
                 set_txtf(U.r_flow[pg_i][i], "→ %s · %s", prov, r.account);
             else
                 set_txtf(U.r_flow[pg_i][i], "→ %s", prov);
-            set_txtf(U.r_use[pg_i][i], "%s token · %s", fmt_k(r.tokens(), b1, sizeof(b1)),
+            set_txtf(U.r_use[pg_i][i], "%s tok · %s", fmt_k(r.tokens(), b1, sizeof(b1)),
                      fmt_secs(r.ms, b2, sizeof(b2)));
         }
     }
@@ -2424,9 +2408,11 @@ void ui_update(const DashData &d) {
             set_txtf(U.r_top_to, "%s · %s", r0.provider, r0.account);
         else
             set_txt(U.r_top_to, r0.provider);
+        set_bg(U.r_top_dot, r0.ok() ? C_GREEN : C_RED);
     } else {
         set_txt(U.r_top_agent, "--");
         set_txt(U.r_top_to, "--");
+        set_bg(U.r_top_dot, C_FAINT);
     }
     for (int k = 0; k < 2; k++)
         set_txtf(U.r_sum[k], "今天 %u 次调用 · %s token", (unsigned)d.today_calls,
@@ -2578,14 +2564,13 @@ void ui_quickcal_begin() {
     lv_obj_set_pos(s_qc, 0, 0);
     lv_obj_set_size(s_qc, LCD_W, LCD_H);
     lv_obj_clear_flag(s_qc, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_style_bg_color(s_qc, lv_color_hex(0x101018), 0);
+    lv_obj_set_style_bg_color(s_qc, lv_color_hex(C_BG), 0);
     lv_obj_set_style_bg_opa(s_qc, LV_OPA_COVER, 0);
 
     s_qc_box = lv_obj_create(s_qc);
     lv_obj_remove_style_all(s_qc_box);
-    lv_obj_set_style_bg_color(s_qc_box, lv_color_hex(C_ORANGE), 0);
+    lv_obj_set_style_bg_color(s_qc_box, lv_color_hex(C_GREEN), 0);
     lv_obj_set_style_bg_opa(s_qc_box, LV_OPA_70, 0);
-    lv_obj_set_style_radius(s_qc_box, 10, 0);
     lv_obj_set_style_border_width(s_qc_box, 3, 0);
     lv_obj_set_style_border_color(s_qc_box, lv_color_hex(0xFFFFFF), 0);
 

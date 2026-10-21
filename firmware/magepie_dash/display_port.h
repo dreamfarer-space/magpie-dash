@@ -25,6 +25,7 @@ void display_tick();
 bool display_wait_idle(uint32_t timeout_ms);  // diagnostic: final transfer complete
 // Opt-in regression seam: a real LVGL press/release, bypassing only the GT911.
 void display_test_tap(int x, int y);
+void display_test_press(int x, int y, bool down);  // half a tap
 void run_touch_regression();
 
 // True while a finger is on the glass.

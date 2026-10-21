@@ -1,8 +1,16 @@
-"""Generate LVGL 8 bitmap fonts (Ark Pixel 10/12/24, 1bpp) for the dashboard.
+"""Generate LVGL 8 bitmap fonts (Ark Pixel monospaced 10/12/24, 1bpp) for the dashboard.
 
-All UI strings live here so the font subset and the firmware text stay in sync.
+The glyph subset is every non-ASCII character in the firmware's string
+literals (scanned below) plus STRINGS, which lists text that only arrives at
+runtime from the gateway (account names, agent names...). A new label in the
+firmware therefore can never render as blank boxes.
+
+Fonts: Ark Pixel *monospaced* (https://github.com/TakWolf/ark-pixel-font),
+zh_hans cut, in TTF_DIR. Half-width glyphs are exactly 5 / 6 px wide, CJK and
+box-drawing glyphs exactly 10 / 12 px, which is what the UI's column grid uses.
+
 Run:  python gen_fonts.py
-Out:  ../firmware/magepie_dash/fonts/*.c
+Out:  ../firmware/magepie_dash/ark*.c
 """
 import os
 import re
@@ -18,7 +26,7 @@ LVCONV = ["node", r"D:\esp32\tools\node_modules\lv_font_conv\lv_font_conv.js"]
 # ---------------------------------------------------------------- UI strings
 STRINGS = [
     # header / home
-    "@bruc3van", "10/15 周四", "21 49", "周一", "周二", "周三", "周四", "周五", "周六", "周日",
+    "10/15 周四", "21 49", "周一", "周二", "周三", "周四", "周五", "周六", "周日",
     "Claude Buddy", "运行命令", "magpie", "今天", "次", "已用时", "秒", "小时", "分钟", "天",
     # claude code status pages
     "CLAUDE CODE", "个会话", "斟酌中", "编写代码", "等你确认", "运行命令 : git push origin main",
@@ -67,20 +75,37 @@ STRINGS = [
     "均价", "次", "工作中", "已完成", "空闲", "做完了",
 ]
 
+FW_DIR = os.path.join(ROOT, "firmware", "magepie_dash")
+LITERAL = re.compile(r'"((?:[^"\\\n]|\\.)*)"')
+
+
+def firmware_strings():
+    """Every string literal in the sketch (agent lines in agent_sprites.h too)."""
+    out = []
+    for name in sorted(os.listdir(FW_DIR)):
+        if not name.endswith((".cpp", ".h", ".ino")) or name.startswith("ark"):
+            continue
+        with open(os.path.join(FW_DIR, name), encoding="utf-8") as f:
+            for line in f:
+                if "_map[] = {" in line:  # sprite pixel data, no text
+                    continue
+                out += LITERAL.findall(line)
+    return out
+
+
 # ASCII printable is always included
 CHARS = set(chr(c) for c in range(0x20, 0x7F))
-for s in STRINGS:
+for s in STRINGS + firmware_strings():
     CHARS |= set(s)
-CHARS |= set("·—→↻≈■●★")
+CHARS |= set("·—→↻≈■●★▶›‹─•")
 CPS = sorted(ord(c) for c in CHARS)
 print("unique glyphs:", len(CPS))
 
 FONTS = [
-    # name, ttf, size, bpp
-    ("ark10", "ark-pixel-10px-proportional-zh_hans.ttf", 10, 1),
-    ("ark12", "ark-pixel-12px-proportional-zh_hans.ttf", 12, 1),
-    ("ark24", "ark-pixel-12px-proportional-zh_hans.ttf", 24, 1),
-    ("ark16", "ark-pixel-16px-proportional-zh_cn.ttf", 16, 1),
+    # name, ttf, size
+    ("ark10", "ark-pixel-10px-monospaced-zh_hans.ttf", 10),  # Latin only: the 10 px cut has no CJK
+    ("ark12", "ark-pixel-12px-monospaced-zh_hans.ttf", 12),
+    ("ark24", "ark-pixel-12px-monospaced-zh_hans.ttf", 24),
 ]
 
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -96,16 +121,29 @@ def font_cmap(path):
     return cm
 
 
-for name, ttf, size, bpp in FONTS:
+def glyphs_in(src):
+    """Code points a generated font really contains (cmap ranges + sparse lists)."""
+    lists = {m.group(1): [int(x, 16) for x in re.findall(r"0x([0-9a-fA-F]+)", m.group(2))]
+             for m in re.finditer(r"unicode_list_(\d+)\[\]\s*=\s*\{(.*?)\};", src, re.S)}
+    got = set()
+    for m in re.finditer(r"\.range_start = (\d+), \.range_length = (\d+),.*?"
+                         r"\.unicode_list = (NULL|unicode_list_(\d+))", src, re.S):
+        start, length = int(m.group(1)), int(m.group(2))
+        if m.group(4):
+            got |= {start + ofs for ofs in lists[m.group(4)]}
+        else:
+            got |= set(range(start, start + length))
+    return got
+
+
+for name, ttf, size in FONTS:
     out = os.path.join(OUT_DIR, name + ".c")
     cm = font_cmap(os.path.join(TTF_DIR, ttf))
     wanted = [cp for cp in CPS if cp in cm]
-    dropped = [cp for cp in CPS if cp not in cm]
-    print(f"  {name}: wanted {len(wanted)}, not in font: {''.join(chr(c) for c in dropped) or '-'}")
     cmd = LVCONV + [
         "--font", os.path.join(TTF_DIR, ttf),
         "--size", str(size),
-        "--bpp", str(bpp),
+        "--bpp", "1",
         "--format", "lvgl",
         "--lv-include", "lvgl.h",
         "--no-compress",
@@ -121,10 +159,7 @@ for name, ttf, size, bpp in FONTS:
         print(r.stdout[-3000:])
         print(r.stderr[-3000:])
         sys.exit(1)
-    src = open(out, encoding="utf-8").read()
-    got = set(range(0x20, 0x7F))
-    for m in re.finditer(r"unicode_list_\d+\[\]\s*=\s*\{(.*?)\};", src, re.S):
-        got |= {int(x, 16) for x in re.findall(r"0x([0-9a-fA-F]+)", m.group(1))}
-    missing = [cp for cp in CPS if cp not in got]
-    print(f"  {name}: {os.path.getsize(out)} bytes, glyphs={len(got)}, "
-          f"missing={''.join(chr(c) for c in missing) or '-'}")
+    got = glyphs_in(open(out, encoding="utf-8").read())
+    missing = "".join(chr(cp) for cp in CPS if cp not in got)
+    print(f"  {name}: {os.path.getsize(out)} bytes, {len(got)} glyphs, "
+          f"not in the font: {missing or '-'}")
