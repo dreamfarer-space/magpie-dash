@@ -1508,7 +1508,7 @@ static void link_panel_refresh() {
     if (usb)
         set_txt(U.lk_hint, "插上 USB 线就能用，不用路由器");
     else
-        set_txt(U.lk_hint, "手机连热点 magpie-dash-setup 配网");
+        set_txt(U.lk_hint, "手机连 WiFi magpie-dash-setup 配网");
 
     for (int i = 0; i < 2; i++) {
         if (!U.lk_btn[i]) continue;
