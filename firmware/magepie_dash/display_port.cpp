@@ -503,21 +503,30 @@ bool display_wait_idle(uint32_t timeout_ms) {
     return true;
 }
 
-void display_test_tap(int x, int y) {
+// Press and release are separate so a benchmark can time "finger down ->
+// page on the glass" (tabs switch on press) without the hold in between.
+void display_test_press(int x, int y, bool down) {
     if (!s_pointer) { Serial.println("[taptest] no pointer driver"); return; }
     s_test_input = true;
-    s_test_data = {};
-    s_test_data.point.x = x;
-    s_test_data.point.y = y;
-    s_test_data.state = LV_INDEV_STATE_RELEASED;
-    lv_indev_reset(s_pointer, nullptr);
+    if (down) {
+        s_test_data = {};
+        s_test_data.point.x = x;
+        s_test_data.point.y = y;
+        s_test_data.state = LV_INDEV_STATE_RELEASED;
+        lv_indev_reset(s_pointer, nullptr);
+        lv_indev_read_timer_cb(s_pointer->driver->read_timer);
+        s_test_data.state = LV_INDEV_STATE_PRESSED;
+    } else {
+        s_test_data.state = LV_INDEV_STATE_RELEASED;
+    }
     lv_indev_read_timer_cb(s_pointer->driver->read_timer);
-    s_test_data.state = LV_INDEV_STATE_PRESSED;
-    lv_indev_read_timer_cb(s_pointer->driver->read_timer);
+    s_test_input = down;  // while held, the GT911 must not report a release
+}
+
+void display_test_tap(int x, int y) {
+    display_test_press(x, y, true);
     delay(30);
-    s_test_data.state = LV_INDEV_STATE_RELEASED;
-    lv_indev_read_timer_cb(s_pointer->driver->read_timer);
-    s_test_input = false;
+    display_test_press(x, y, false);
 }
 
 bool touch_pressed() { return finger_down; }

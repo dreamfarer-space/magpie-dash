@@ -1,4 +1,5 @@
-// Nine-page dashboard UI (LVGL 8), replicating the pixel design.
+// Ten-page dashboard UI (LVGL 8), terminal style: a prompt bar, outlined panes
+// on a monospaced grid, and an htop-like tab bar shared by every page.
 #pragma once
 #include <lvgl.h>
 
@@ -31,8 +32,9 @@ void ui_settings_refresh();
 // Serial 'Z': taps the settings rows/keyboard for real and reports PASS/FAIL.
 void ui_settings_test();
 
-// Centre of tab i (0=Agent .. 4=设置); used by the hit-test regression.
+// Centre of tab i (0=主页 1=Agent .. 5=设置); used by the hit-test regression.
 int ui_tab_center_x(int index);
+int ui_tab_center_y();
 
 // Debug: step the usage period (今天 -> 7 天 -> 30 天 -> 全部).
 void ui_cycle_period();
