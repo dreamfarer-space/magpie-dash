@@ -9,6 +9,13 @@ void ui_init();
 void ui_update(const DashData &d);  // refresh labels after a fetch
 void ui_tick();                     // clock + animations, call every loop
 void ui_goto(int page);
+
+// Interface language (see i18n.h): the tap only flags the change, the main loop
+// persists it and calls ui_rebuild(), which recreates every page in the new
+// language.
+void ui_set_language(uint8_t lang);
+bool ui_lang_take_dirty();
+void ui_rebuild();
 void ui_page_settle();  // paint a coalesced page switch, call every loop
 void ui_tap_page(int page);  // debug: same path as a tab tap (coalesces)
 void ui_next_page();

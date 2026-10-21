@@ -36,7 +36,7 @@ ESP32-S3 · LVGL 8 · 一根 USB 线或普通 WiFi
 | **`额度`** | 每个上游账号一个窗格。每个额度窗口显示一条 `■` 进度条、百分比与重置时间。 |
 | **`用量`** | 今日 / 7 天 / 30 天 / 全部：token（输入 / 输出 / 缓存）、请求数与失败数、花费与平均价格、缓存命中率、分时段柱状图。 |
 | **Routes** | 最新请求的拓扑结构（`agent ──▶ magpie ──▶ upstream account`），下方是可滚动的请求日志。点击顶部栏可展开为全页日志。 |
-| **Settings** | 显示名称（屏幕键盘）、剩余 / 已用额度切换、刷新间隔、头像动效、隐藏开销切换、连接模式（USB / WiFi）。 |
+| **Settings** | 显示名称（屏幕键盘）、剩余 / 已用额度切换、刷新间隔、头像动效、隐藏开销切换、**语言（English / 中文）**、连接模式（USB / WiFi）。 |
 
 | | | |
 |---|---|---|
@@ -50,6 +50,21 @@ ESP32-S3 · LVGL 8 · 一根 USB 线或普通 WiFi
 - 点击头像：精灵图标会跳动并显示其专属台词（例如 Claude Code 的「Clauding...」、Codex 的「> codex exec」）；连续点击 5 次会触发抱怨。
 - Agent 详情中的「跟随」会将 Home 和 Status 页面固定到该 agent，10 分钟后自动恢复为「跟随最新请求」。
 - 长按顶部提示符栏进入两点触摸校准。
+
+### 语言
+
+出厂的默认界面是**英文**；在 Settings → `language` 一行点一下即可整体切换为**中文**。板子给手机提供的 WiFi 配网页面也跟随这一设置。
+
+- 面板文案都会跟着变：窗格标题、htop 风格底栏、额度措辞（`5h quota` / `5 小时额度`）、倒计时（`resets in 3d 21h` / `3 天 21 小时后重置`）、额度重置日期、相对时间、顶部提示符里的星期、头像台词，以及触屏键盘上的按钮。技术标记类标签在两种语言下保持不变（`token`、`in` / `out` / `cache`、`usb`、`src:`），触摸校准提示也固定为英文（它属于维修用界面）。
+- 文案集中在 [`firmware/magepie_dash/i18n.cpp`](firmware/magepie_dash/i18n.cpp)，以中文原文为键：调用处写作 `T("等待网关")`；表里没有的条目会退回中文，而不是渲染成空标签。`python tools/check_i18n.py`（CI 中执行）会在 `T()` 缺少译文、或译文漏掉 `%d` 之类格式符时报错。
+- 切换语言会重建整个 LVGL 对象树（列宽取决于措辞），板上实测约 0.95 s，与冷启动构建一次相同；选择写入 NVS，重启后保持。
+- 串口 `U` 可在不碰屏幕的情况下切换语言，两套中英文截图都是这样拍的。
+
+| | |
+|---|---|
+| ![English home page](docs/screen-home-en.png) | ![English config page](docs/screen-config-en.png) |
+
+上面页面表里的截图取自中文构建；本节新增的两张是英文默认界面。串口按 `U` 可让板子在两者间切换。
 
 ## 硬件
 
@@ -175,6 +190,7 @@ powershell -File tools/bridge_autostart.ps1 -Action status
 | `b` | 连续快速点击 4 次（验证点击合并） |
 | `f` / `k` / `o` | 切换到下一个 agent 头像 / 点击当前头像 / 打开首行详情面板 |
 | `F` / `L` `X` / `y` `Y` | 循环切换 `用量` 周期 / 打开、关闭连接面板 / 打开、关闭键盘 |
+| `U` | 切换界面语言（与 `language` 行同一条路径，会重建全部页面） |
 | `G` / `H` | 向上 / 向下滚动路由日志 |
 | `T` / `c` `x` / `K` | 颜色与触摸方向测试图样 / 打开、关闭校准画面 / 清除 NVS 中的触摸校准数据 |
 | `t` / `d` / `V` / `D` | 原始触摸坐标 / 导出对象树 / 切换逐事件日志开关 / 将设置恢复为默认值 |
@@ -189,7 +205,8 @@ powershell -File tools/bridge_autostart.ps1 -Action status
 ## 仓库目录结构
 
 ```
-firmware/magepie_dash/   Arduino project (ui.cpp: UI, gateway.cpp: data polling, usb_link.cpp: protocol, display_port.cpp: display and touch)
+firmware/magepie_dash/   Arduino project (ui.cpp: UI, i18n.cpp: 中英文文案, gateway.cpp: data polling,
+                         usb_link.cpp: protocol, display_port.cpp: display and touch)
 firmware/lv_conf.h       LVGL configuration; copy to Arduino libraries/ directory
 tools/                   USB bridge, relay, font/sprite generators, screenshot/recording tools, regression tests
 docs/                    Screenshots and demo assets for README
