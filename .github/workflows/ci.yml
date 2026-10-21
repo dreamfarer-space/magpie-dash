@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash  # explicit: runs with -eo pipefail, so "compile | tee" fails when compile does
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Same toolchain as the bench build (flash.sh); bump together.
+  ESP32_CORE: "3.3.12"
+  LIBS: '"lvgl@8.3.7" "ArduinoJson@7.4.3" "GFX Library for Arduino@1.6.9"'
+  FQBN: "esp32:esp32:esp32s3:USBMode=hwcdc,CDCOnBoot=cdc,PSRAM=opi,FlashSize=4M,PartitionScheme=huge_app,CPUFreq=240,FlashMode=qio,UploadSpeed=921600,DebugLevel=none"
+
+jobs:
+  tools:
+    name: host tools
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Byte-compile every tool
+        run: python -m py_compile tools/*.py
+      - name: USB protocol tests
+        working-directory: tools
+        run: python -m unittest -v test_usb_protocol
+      - name: Every on-screen string has a glyph in the font
+        run: python tools/check_glyphs.py
+
+  firmware:
+    name: firmware (ESP32-S3)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Cache core and libraries
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.arduino15
+            ~/Arduino/libraries
+          key: arduino-esp32-${{ env.ESP32_CORE }}-${{ hashFiles('.github/workflows/ci.yml') }}
+      - name: Install core and libraries
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core update-index
+          arduino-cli core install "esp32:esp32@${ESP32_CORE}"
+          eval arduino-cli lib install ${LIBS}
+          # LVGL looks for lv_conf.h next to its own folder
+          cp firmware/lv_conf.h "$(arduino-cli config get directories.user)/libraries/lv_conf.h"
+      - name: Compile
+        run: |
+          arduino-cli compile --fqbn "$FQBN" --warnings default \
+            --output-dir dist firmware/magepie_dash 2>&1 | tee build.log
+          grep -E "Sketch uses|Global variables" build.log >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: magpie-dash-firmware
+          path: |
+            dist/*.bin
+          if-no-files-found: error
