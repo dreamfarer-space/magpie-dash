@@ -39,6 +39,8 @@ jobs:
         run: python -m unittest -v test_usb_protocol
       - name: Every on-screen string has a glyph in the font
         run: python tools/check_glyphs.py
+      - name: Every translated string has English text and keeps its format specifiers
+        run: python tools/check_i18n.py
 
   firmware:
     name: firmware (ESP32-S3)

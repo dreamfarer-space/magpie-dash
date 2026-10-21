@@ -2,6 +2,8 @@
 #pragma once
 #include <Arduino.h>
 
+#include "i18n.h"
+
 struct AppCfg {
     char handle[20];     // shown as @handle in the top-left of the home page
     uint8_t quota_mode;  // 0 = show remaining, 1 = show used
@@ -9,6 +11,7 @@ struct AppCfg {
     uint8_t anim;        // avatar hop + speech animation
     uint8_t privacy;     // mask money figures on screen
     uint8_t link_mode;   // 0 = USB cable, 1 = WiFi (LAN)
+    uint8_t lang;        // LANG_ZH / LANG_EN: language of every UI string
 };
 
 extern AppCfg g_cfg;

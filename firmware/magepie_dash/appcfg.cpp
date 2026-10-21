@@ -13,6 +13,8 @@ void cfg_defaults() {
     g_cfg.anim = 1;
     g_cfg.privacy = 0;
     g_cfg.link_mode = 0;  // USB out of the box: no router, no credentials needed
+    g_cfg.lang = LANG_EN;  // this firmware ships as the English build; the
+                          // settings page switches to Chinese in one tap
 }
 
 void cfg_load() {
@@ -31,11 +33,14 @@ void cfg_load() {
     g_cfg.anim = s_prefs.getUChar("anim", g_cfg.anim) ? 1 : 0;
     g_cfg.privacy = s_prefs.getUChar("privacy", g_cfg.privacy) ? 1 : 0;
     g_cfg.link_mode = s_prefs.getUChar("link", g_cfg.link_mode) ? 1 : 0;
+    g_cfg.lang = s_prefs.getUChar("lang", g_cfg.lang) ? LANG_EN : LANG_ZH;
     s_prefs.end();
+    lang_set(g_cfg.lang);  // before the UI is built: T() reads it
     if (!g_cfg.handle[0]) snprintf(g_cfg.handle, sizeof(g_cfg.handle), "Dreamfarer");
-    Serial.printf("[cfg] handle=@%s quota=%s refresh=%us anim=%u privacy=%u\n", g_cfg.handle,
-                  g_cfg.quota_mode ? "used" : "left", (unsigned)g_cfg.refresh_s,
-                  (unsigned)g_cfg.anim, (unsigned)g_cfg.privacy);
+    Serial.printf("[cfg] handle=@%s quota=%s refresh=%us anim=%u privacy=%u lang=%s\n",
+                  g_cfg.handle, g_cfg.quota_mode ? "used" : "left", (unsigned)g_cfg.refresh_s,
+                  (unsigned)g_cfg.anim, (unsigned)g_cfg.privacy,
+                  g_cfg.lang == LANG_EN ? "en" : "zh");
 }
 
 void cfg_save() {
@@ -49,10 +54,11 @@ void cfg_save() {
     s_prefs.putUChar("anim", g_cfg.anim);
     s_prefs.putUChar("privacy", g_cfg.privacy);
     s_prefs.putUChar("link", g_cfg.link_mode);
+    s_prefs.putUChar("lang", g_cfg.lang);
     s_prefs.end();
-    Serial.printf("[cfg] saved handle=@%s quota=%u refresh=%us anim=%u privacy=%u\n", g_cfg.handle,
-                  (unsigned)g_cfg.quota_mode, (unsigned)g_cfg.refresh_s, (unsigned)g_cfg.anim,
-                  (unsigned)g_cfg.privacy);
+    Serial.printf("[cfg] saved handle=@%s quota=%u refresh=%us anim=%u privacy=%u lang=%u\n",
+                  g_cfg.handle, (unsigned)g_cfg.quota_mode, (unsigned)g_cfg.refresh_s,
+                  (unsigned)g_cfg.anim, (unsigned)g_cfg.privacy, (unsigned)g_cfg.lang);
 }
 
 uint8_t cfg_next_refresh(uint8_t cur) {

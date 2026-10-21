@@ -13,6 +13,7 @@
 #include "board.h"
 #include "config.h"
 #include "gateway.h"
+#include "i18n.h"
 #include "netcfg.h"
 #include "usb_link.h"
 #include "util.h"
@@ -68,6 +69,7 @@ static uint32_t s_focus_ms = 0;
 
 static void link_panel_close();
 static void kb_close();
+static void qc_close();  // quick 2-point touch calibration overlay
 static void link_panel_refresh();
 static void close_overlays();
 
@@ -76,7 +78,7 @@ static struct {
     // chrome
     lv_obj_t *tb_prompt, *tb_cursor, *tb_right, *tab_box[6], *tab_lbl[6];
     // settings page
-    lv_obj_t *set_row[6], *set_val[6];
+    lv_obj_t *set_row[7], *set_val[7];
     // connection panel (settings -> 连接 magpie)
     lv_obj_t *lk, *lk_state, *lk_addr, *lk_hint, *lk_btn[2];
     // home
@@ -324,6 +326,14 @@ struct Avatar {
 
 static Avatar s_av_home, s_av_state[3], s_av_sheet;
 
+// English catchphrases come from i18n.cpp (keyed by agent id); the shipped
+// table in agent_sprites.h stays Chinese and is the fallback.
+static const char *say_for(const AgentSkin *sk, int idx) {
+    if (!sk) return "";
+    const char *en = say_line(sk->id, idx);
+    return en ? en : sk->say[idx & 1];
+}
+
 // The breathing loop asks for the same 0..-3 px offsets ~60 times a second;
 // writing an unchanged style still invalidates the avatar, so skip those.
 static void anim_translate_y(void *o, int32_t v) {
@@ -418,7 +428,7 @@ static void avatar_poke(Avatar &a) {
     const uint32_t now = lv_tick_get();
     a.pokes = now - a.poke_ms < 1500 ? a.pokes + 1 : 1;
     a.poke_ms = now;
-    avatar_say(a, a.pokes >= 5 ? "别戳了 >_<" : a.sk->say[a.say++ & 1], 2200);
+    avatar_say(a, a.pokes >= 5 ? T("别戳了 >_<") : say_for(a.sk, a.say++), 2200);
     avatar_hop(a);
     Serial.printf("[ui] poke %s x%d\n", a.sk->id, a.pokes);
 }
@@ -543,11 +553,11 @@ static void win_long(const char *name, char *out, size_t n) {
     char unit, group[12];
     win_parse(name, &num, &unit, group, sizeof(group));
     if (num && unit == 'h')
-        snprintf(out, n, "%d 小时额度", num);
+        snprintf(out, n, T("%d 小时额度"), num);
     else if (num && unit == 'd')
-        snprintf(out, n, "%d 天额度", num);
+        snprintf(out, n, T("%d 天额度"), num);
     else if (num && unit == 'w')
-        snprintf(out, n, "%d 周额度", num);
+        snprintf(out, n, T("%d 周额度"), num);
     else
         snprintf(out, n, "%s", group[0] ? group : name);
 }
@@ -630,7 +640,7 @@ static void build_chrome() {
     lv_label_set_recolor(U.tb_right, true);
 
     // ---- tab bar, htop style: "1[主页 ] 2[Agent] ..." with the page lit
-    static const char *names[6] = {"主页", "Agent", "额度", "用量", "路由", "设置"};
+    const char *names[6] = {T("主页"), "Agent", T("额度"), T("用量"), T("路由"), T("设置")};
     lv_obj_t *bar = obj(scr, 0, TAB_Y, LCD_W, TAB_H);
     fill(bar, C_BG);
     hline(bar, 0, 0, LCD_W, C_LINE);
@@ -704,15 +714,15 @@ static void build_home() {
     U.hm_name = txt_clip(cl, "--", 84, 14, 138, &ark12, C_TEXT);
     U.hm_sub = txt_clip(cl, "", 84, 30, 138, &ark12, C_MUTED);
     U.hm_dot = dot(cl, 84, 52, 6, C_FAINT);
-    U.hm_state = txt_clip(cl, "等待网关", 96, 48, 126, &ark12, C_MUTED);
+    U.hm_state = txt_clip(cl, T("等待网关"), 96, 48, 138, &ark12, C_MUTED);
     dline(cl, 8, 104, 214);
     for (int k = 0; k < 2; k++) {
         U.hm_qk[k] = txt(cl, k ? "7d" : "5h", 8, 114 + k * 18, &ark12, C_MUTED);
         U.hm_qbar[k] = tbar(cl, 42, 114 + k * 18, 12);
         U.hm_qpct[k] = txt_r(cl, "--", 222, 114 + k * 18, 36, &ark12, C_TEXT);
     }
-    U.hm_today = kv(cl, "今天调用", 8, 222, 158, 100);
-    U.hm_30d = kv(cl, "30 天调用", 8, 222, 174, 100);
+    U.hm_today = kv(cl, T("今天调用"), 8, 222, 158, 100);
+    U.hm_30d = kv(cl, T("30 天调用"), 8, 222, 174, 100);
     U.hm_reset = txt_clip(cl, "", 8, 190, 214, &ark12, C_FAINT);
     lv_obj_add_flag(cl, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_border_color(cl, lv_color_hex(C_MUTED), LV_STATE_PRESSED);
@@ -723,17 +733,17 @@ static void build_home() {
     pane_title(cr, "magpie", C_PURPLE);
     U.mg_state = pane_title(cr, "offline", C_FAINT, true);
     U.mg_calls = txt(cr, "--", 10, 12, &ark24, C_TEXT);
-    txt(cr, "今天调用", 10, 40, &ark12, C_MUTED);
+    txt(cr, T("今天调用"), 10, 40, &ark12, C_MUTED);
     U.mg_tok = kv(cr, "token", 10, 220, 62, 120);
-    U.mg_cost = kv(cr, "费用", 10, 220, 78, 120);
+    U.mg_cost = kv(cr, T("费用"), 10, 220, 78, 120);
     U.mg_costk = lv_obj_get_child(cr, lv_obj_get_child_cnt(cr) - 2);  // "费用 30d" key
-    U.mg_sess = kv(cr, "会话", 10, 220, 94, 120);
-    U.mg_last = kv(cr, "最近", 10, 220, 110, 120);
+    U.mg_sess = kv(cr, T("会话"), 10, 220, 94, 120);
+    U.mg_last = kv(cr, T("最近"), 10, 220, 110, 120);
     dline(cr, 8, 130, 214);
     U.mg_cap = txt(cr, "token / 30d", 10, 138, &ark12, C_MUTED);
     U.mg_max = txt_r(cr, "", 220, 138, 80, &ark12, C_FAINT);
     bars_create(cr, U.mg_bars, 10, 200);
-    U.mg_empty = txt(cr, "暂无数据", 0, 0, &ark12, C_FAINT);
+    U.mg_empty = txt(cr, T("暂无数据"), 0, 0, &ark12, C_FAINT);
     lv_obj_align(U.mg_empty, LV_ALIGN_TOP_MID, 0, 170);
     lv_obj_add_flag(cr, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_border_color(cr, lv_color_hex(C_MUTED), LV_STATE_PRESSED);
@@ -759,9 +769,9 @@ static void build_state(int idx, int page_id, bool confirm) {
 
     lv_obj_t *c = pane(p, 192, 8, 282, 210, confirm ? C_AMBER : C_LINE);
     U.st_title_l[idx] = pane_title(c, "claude", C_MUTED);
-    U.st_sess[idx] = pane_title(c, "-- 个会话", C_MUTED, true);
+    U.st_sess[idx] = pane_title(c, T("-- 个会话"), C_MUTED, true);
 
-    U.st_title[idx] = txt(c, confirm ? "! 等你确认" : (idx == 0 ? "> 斟酌中" : "> 编写代码"), 10, 8,
+    U.st_title[idx] = txt(c, confirm ? T("! 等你确认") : (idx == 0 ? T("> 斟酌中") : T("> 编写代码")), 10, 8,
                           &ark24, confirm ? C_AMBER : C_TEXT);
     U.st_cursor[idx] = obj(c, 0, 0, 12, 20);
     fill(U.st_cursor[idx], confirm ? C_AMBER : C_TEXT);
@@ -769,17 +779,17 @@ static void build_state(int idx, int page_id, bool confirm) {
     U.st_sub[idx] = txt_clip(c, "", 10, 38, 262, &ark12, C_MUTED);
     dline(c, 8, 58, 266);
 
-    U.st_l5[idx] = txt(c, "5 小时额度", 10, 68, &ark12, C_TEXT);
+    U.st_l5[idx] = txt(c, T("5 小时额度"), 10, 68, &ark12, C_TEXT);
     U.st_p5[idx] = txt_r(c, "--", 270, 68, 60, &ark12, C_TEXT);
     U.st_bar5[idx] = tbar(c, 10, 84, 21);
-    U.st_l7[idx] = txt(c, "7 天额度", 10, 104, &ark12, C_TEXT);
+    U.st_l7[idx] = txt(c, T("7 天额度"), 10, 104, &ark12, C_TEXT);
     U.st_p7[idx] = txt_r(c, "--", 270, 104, 60, &ark12, C_TEXT);
     U.st_bar7[idx] = tbar(c, 10, 120, 21);
 
     U.st_reset[idx] = txt_clip(c, "", 10, 142, 262, &ark12, C_MUTED);
     U.st_src[idx] = txt_clip(c, "", 10, 158, 262, &ark12, C_MUTED);
     U.st_conn_dot[idx] = dot(c, 10, 190, 6, C_FAINT);
-    U.st_conn[idx] = txt(c, "未连接", 22, 186, &ark12, C_MUTED);
+    U.st_conn[idx] = txt(c, T("未连接"), 22, 186, &ark12, C_MUTED);
 }
 
 // ------------------------------------------------------------------ agents
@@ -799,7 +809,7 @@ static void sheet_open(const char *id) {
     // avatar-poke interaction, not a 450ms animation on every list selection.
     lv_anim_del(s_av_sheet.box, anim_translate_y);
     lv_obj_set_style_translate_y(s_av_sheet.box, 0, 0);
-    avatar_say(s_av_sheet, s_av_sheet.sk->say[0], 1800);
+    avatar_say(s_av_sheet, say_for(s_av_sheet.sk, 0), 1800);
     Serial.printf("[ui] sheet %s\n", U.sh_id);
     if (dbg_verbose) Serial.printf("[agenttrace] %u sheet-shown callback=%u ms\n",
                                    (unsigned)millis(), (unsigned)(millis() - start_ms));
@@ -923,12 +933,12 @@ static void build_agents() {
     pane_title(s, "agent", C_CYAN);
     avatar_create(s_av_sheet, s, 56, 74, false, 8);
     avatar_mode(s_av_sheet, AV_IDLE);
-    txt(s, "轻触头像", 32, 128, &ark12, C_FAINT);
+    txt(s, T("轻触头像"), 32, 128, &ark12, C_FAINT);
 
     U.sh_name = txt_clip(s, "--", 120, 10, 336, &ark12, C_TEXT);
     U.sh_model = txt_clip(s, "", 120, 26, 336, &ark12, C_MUTED);
     dline(s, 120, 46, 336);
-    static const char *labels[4] = {"30 天调用", "今天", "Token", "费用"};
+    const char *labels[4] = {T("30 天调用"), T("今天"), "Token", T("费用")};
     for (int k = 0; k < 4; k++) {
         const int x = 120 + (k % 2) * 176, y = 56 + (k / 2) * 18;
         U.sh_num[k] = kv(s, labels[k], x, x + 160, y, 80);
@@ -936,9 +946,9 @@ static void build_agents() {
     U.sh_share = txt(s, "", 120, 98, &ark12, C_MUTED);
     U.sh_bar = tbar(s, 120, 114, 28);
     U.sh_last = txt_clip(s, "", 120, 136, 336, &ark12, C_MUTED);
-    lv_obj_t *cb = U.sh_close = button(s, 288, 170, 76, "关闭", C_BG, C_MUTED);
+    lv_obj_t *cb = U.sh_close = button(s, 288, 170, 76, T("关闭"), C_BG, C_MUTED);
     lv_obj_add_event_cb(cb, [](lv_event_t *e) { sheet_close(); }, LV_EVENT_CLICKED, NULL);
-    U.sh_follow = button(s, 372, 170, 86, "跟随", C_CYAN, C_BG);
+    U.sh_follow = button(s, 372, 170, 86, T("跟随"), C_CYAN, C_BG);
     lv_obj_add_event_cb(U.sh_follow, sheet_follow_cb, LV_EVENT_CLICKED, NULL);
     show(U.sh, false);
 }
@@ -1014,7 +1024,7 @@ static void build_quota() {
     lv_obj_set_style_pad_top(sc, 2, 0);
     lv_obj_set_style_pad_row(sc, 4, 0);
     lv_obj_set_style_pad_bottom(sc, 8, 0);
-    U.q_empty = txt(sc, "暂无额度数据", 0, 0, &ark12, C_MUTED);
+    U.q_empty = txt(sc, T("暂无额度数据"), 0, 0, &ark12, C_MUTED);
     lv_obj_add_flag(U.q_empty, LV_OBJ_FLAG_IGNORE_LAYOUT);
     lv_obj_align(U.q_empty, LV_ALIGN_TOP_MID, 0, 100);
 
@@ -1071,7 +1081,7 @@ static void filter_cb(lv_event_t *e) { filter_apply((int)(intptr_t)lv_event_get_
 static void build_usage() {
     lv_obj_t *p = pg[PG_USAGE] = make_page();
 
-    static const char *fname[4] = {"今天", "7 天", "30 天", "全部"};
+    const char *fname[4] = {T("今天"), T("7 天"), T("30 天"), T("全部")};
     for (int i = 0; i < 4; i++) {
         lv_obj_t *b = obj(p, 6 + i * 58, 4, 54, 22);
         fill(b, i == s_filter ? C_GREEN : C_DIM);
@@ -1082,10 +1092,10 @@ static void build_usage() {
         lv_obj_add_event_cb(b, filter_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
         u_filter[i] = b;
     }
-    txt_r(p, "src: 网关 + 会话日志", LCD_W - 6, 9, 200, &ark12, C_FAINT);
+    txt_r(p, T("src: 网关 + 会话日志"), LCD_W - 6, 9, 200, &ark12, C_FAINT);
 
     // 4 KPI panes
-    static const char *titles[4] = {"token", "请求", "费用", "缓存命中"};
+    const char *titles[4] = {"token", T("请求"), T("费用"), T("缓存命中")};
     const uint32_t vals_col[4] = {C_GREEN, C_TEXT, C_AMBER, C_CYAN};
     lv_obj_t *v[4], *c[4];
     for (int i = 0; i < 4; i++) {
@@ -1102,10 +1112,10 @@ static void build_usage() {
     U.u_cache = txt(c[0], "", 8, 70, &ark12, C_MUTED);
     U.u_err = txt(c[1], "", 8, 42, &ark12, C_RED);
     U.u_price = txt_clip(c[2], "", 8, 42, 96, &ark12, C_MUTED);  // average cost per call
-    U.u_hit2 = txt(c[3], "占提示词", 8, 42, &ark12, C_MUTED);
+    U.u_hit2 = txt(c[3], T("占提示词"), 8, 42, &ark12, C_MUTED);
 
     lv_obj_t *ch = pane(p, 6, 144, 468, 74);
-    pane_title(ch, "token / 时段", C_MUTED);
+    pane_title(ch, T("token / 时段"), C_MUTED);
     U.u_ymax = txt_r(p, "--", CH_X0 - 6, CH_BASE - CH_H - 4, 36, &ark10, C_FAINT);
     txt_r(p, "0", CH_X0 - 6, CH_BASE - 9, 36, &ark10, C_FAINT);
     hline(p, CH_X0, CH_BASE, CH_W, C_LINE);
@@ -1115,7 +1125,7 @@ static void build_usage() {
         lv_obj_set_width(U.u_lbl[i], 40);
         lv_obj_set_style_text_align(U.u_lbl[i], LV_TEXT_ALIGN_CENTER, 0);
     }
-    U.u_empty = txt(p, "暂无数据", 0, 0, &ark12, C_FAINT);
+    U.u_empty = txt(p, T("暂无数据"), 0, 0, &ark12, C_FAINT);
     lv_obj_align(U.u_empty, LV_ALIGN_TOP_MID, 0, 176);
 }
 
@@ -1136,8 +1146,8 @@ static void build_routes(int page_id) {
     lv_obj_add_flag(sum, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_event_cb(sum, tab_cb, LV_EVENT_CLICKED,
                         (void *)(intptr_t)(idx ? PG_ROUTES : PG_ROUTES_LIST));
-    U.r_sum[idx] = txt(sum, "今天 -- 次调用 · -- token", 6, 6, &ark12, C_TEXT);
-    txt_r(sum, idx ? "收起 «" : "展开 »", LCD_W - 6, 6, 80, &ark12, C_MUTED);
+    U.r_sum[idx] = txt(sum, T("今天 -- 次调用 · -- token"), 6, 6, &ark12, C_TEXT);
+    txt_r(sum, idx ? T("收起 «") : T("展开 »"), LCD_W - 6, 6, 80, &ark12, C_MUTED);
 
     int y0;
     if (idx == 0) {
@@ -1169,7 +1179,7 @@ static void build_routes(int page_id) {
     lv_obj_set_style_width(host, 3, LV_PART_SCROLLBAR);
     lv_obj_set_style_bg_color(host, lv_color_hex(C_LINE), LV_PART_SCROLLBAR);
     lv_obj_set_style_bg_opa(host, LV_OPA_COVER, LV_PART_SCROLLBAR);
-    U.r_empty[idx] = txt(host, "暂无调用", 0, 0, &ark12, C_MUTED);
+    U.r_empty[idx] = txt(host, T("暂无调用"), 0, 0, &ark12, C_MUTED);
     lv_obj_center(U.r_empty[idx]);
 
     const int step = 34;
@@ -1401,10 +1411,10 @@ static void kb_open() {
     s_kb_preview = txt(s_kb, "", 8, 8, &ark12, C_TEXT);
     lv_label_set_recolor(s_kb_preview, true);
     kb_redraw_preview();
-    lv_obj_t *ok = button(s_kb, LCD_W - 96, 2, 46, "保存", C_GREEN, C_BG);
+    lv_obj_t *ok = button(s_kb, LCD_W - 96, 2, 46, T("保存"), C_GREEN, C_BG);
     lv_obj_set_ext_click_area(ok, 2);
     lv_obj_add_event_cb(ok, [](lv_event_t *e) { kb_apply(); }, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *no = button(s_kb, LCD_W - 46, 2, 40, "取消", C_BG, C_MUTED);
+    lv_obj_t *no = button(s_kb, LCD_W - 46, 2, 40, T("取消"), C_BG, C_MUTED);
     lv_obj_set_ext_click_area(no, 2);
     lv_obj_add_event_cb(no, [](lv_event_t *e) { kb_close(); }, LV_EVENT_CLICKED, NULL);
 
@@ -1423,8 +1433,8 @@ static void kb_open() {
         char lab[2] = {r4[i], 0};
         kb_key(s_kb, x0 + i * (kw + gap), 140, kw, 32, lab, r4[i]);
     }
-    kb_key(s_kb, tall_x, 32, tall_w, 68, "删", '\b');  // "⌫" is not in the subset font
-    kb_key(s_kb, tall_x, 104, tall_w, 68, "清空", 0);
+    kb_key(s_kb, tall_x, 32, tall_w, 68, T("删"), '\b');  // "⌫" is not in the subset font
+    kb_key(s_kb, tall_x, 104, tall_w, 68, T("清空"), 0);
     lv_obj_t *clr = lv_obj_get_child(s_kb, lv_obj_get_child_cnt(s_kb) - 1);
     lv_obj_add_event_cb(clr, [](lv_event_t *e) {
         s_kb_buf[0] = 0;
@@ -1432,13 +1442,23 @@ static void kb_open() {
     }, LV_EVENT_CLICKED, NULL);
 }
 
+// Row order of the config page. The language row joined late: seven rows now
+// share the same 210 px pane, so the pitch is 29 px instead of 34.
+#define SET_ROWS 7
+#define SET_PITCH 29
+enum { ROW_NAME = 0, ROW_QUOTA, ROW_REFRESH, ROW_ANIM, ROW_PRIVACY, ROW_LANG, ROW_LINK };
+
 static void row_cycle_cb(lv_event_t *e) {
     const int which = (int)(intptr_t)lv_event_get_user_data(e);
     switch (which) {
-        case 1: g_cfg.quota_mode = !g_cfg.quota_mode; break;
-        case 2: g_cfg.refresh_s = cfg_next_refresh(g_cfg.refresh_s); break;
-        case 3: g_cfg.anim = !g_cfg.anim; break;
-        case 4: g_cfg.privacy = !g_cfg.privacy; break;
+        case ROW_QUOTA: g_cfg.quota_mode = !g_cfg.quota_mode; break;
+        case ROW_REFRESH: g_cfg.refresh_s = cfg_next_refresh(g_cfg.refresh_s); break;
+        case ROW_ANIM: g_cfg.anim = !g_cfg.anim; break;
+        case ROW_PRIVACY: g_cfg.privacy = !g_cfg.privacy; break;
+        case ROW_LANG:
+            // Rebuilds the whole tree, so it cannot run inside this tap handler.
+            ui_set_language(lang_get() == LANG_EN ? LANG_ZH : LANG_EN);
+            return;
         default: return;
     }
     s_cfg_dirty = true;
@@ -1461,21 +1481,21 @@ static void link_panel_refresh() {
     char b[80];
     const char *live = gw_active_link();
     if (!strcmp(live, "-"))
-        set_txt(U.lk_state, usb ? "● USB · 等待电脑端桥接" : "● WiFi · 未连接");
+        set_txt(U.lk_state, usb ? T("● USB · 等待电脑端桥接") : T("● WiFi · 未连接"));
     else
-        set_txtf(U.lk_state, "● %s · 已连接", live);
+        set_txtf(U.lk_state, T("● %s · 已连接"), live);
     set_color(U.lk_state, strcmp(live, "-") ? C_GREEN : C_AMBER);
 
     if (usb)
         set_txt(U.lk_addr, "$ py tools/usb_bridge.py");
     else {
-        snprintf(b, sizeof(b), "网关 %s:%u", netcfg_host(), (unsigned)netcfg_port());
+        snprintf(b, sizeof(b), T("网关 %s:%u"), netcfg_host(), (unsigned)netcfg_port());
         set_txt(U.lk_addr, b);
     }
     if (usb)
-        set_txt(U.lk_hint, "插上 USB 线就能用，不用路由器");
+        set_txt(U.lk_hint, T("插上 USB 线就能用，不用路由器"));
     else
-        set_txt(U.lk_hint, "手机连 WiFi magpie-dash-setup 配网");
+        set_txt(U.lk_hint, T("手机连 WiFi magpie-dash-setup 配网"));
 
     for (int i = 0; i < 2; i++) {
         if (!U.lk_btn[i]) continue;
@@ -1521,21 +1541,21 @@ static void link_panel_open() {
     lv_obj_add_flag(s_link, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_t *c = pane(s_link, 6, 8, 468, 210, C_CYAN);
     lv_obj_add_flag(c, LV_OBJ_FLAG_EVENT_BUBBLE);
-    pane_title(c, "连接 magpie", C_CYAN);
+    pane_title(c, T("连接 magpie"), C_CYAN);
 
-    lv_obj_t *x = button(c, 468 - 66, 8, 56, "关闭", C_BG, C_MUTED);
+    lv_obj_t *x = button(c, 468 - 66, 8, 56, T("关闭"), C_BG, C_MUTED);
     lv_obj_set_ext_click_area(x, 2);
     lv_obj_add_event_cb(x, [](lv_event_t *e) { link_panel_close(); }, LV_EVENT_CLICKED, NULL);
 
-    link_mode_btn(c, 10, 8, 160, "USB 一根线", 0);
-    link_mode_btn(c, 176, 8, 160, "WiFi 局域网", 1);
+    link_mode_btn(c, 10, 8, 160, T("USB 一根线"), 0);
+    link_mode_btn(c, 176, 8, 160, T("WiFi 局域网"), 1);
 
     U.lk_state = txt(c, "--", 10, 52, &ark12, C_TEXT);
     U.lk_addr = txt(c, "--", 10, 72, &ark12, C_TEXT);
     U.lk_hint = txt(c, "--", 10, 88, &ark12, C_FAINT);
     dline(c, 8, 112, 450);
 
-    lv_obj_t *retry = button(c, 10, 124, 104, "重新连接", C_BG, C_TEXT);
+    lv_obj_t *retry = button(c, 10, 124, 104, T("重新连接"), C_BG, C_TEXT);
     lv_obj_set_ext_click_area(retry, 2);
     lv_obj_add_event_cb(retry, [](lv_event_t *e) {
         if (g_cfg.link_mode == 0)
@@ -1545,7 +1565,7 @@ static void link_panel_open() {
         link_panel_refresh();
     }, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *portal = button(c, 122, 124, 110, "WiFi 配网", C_BG, C_TEXT);
+    lv_obj_t *portal = button(c, 122, 124, 110, T("WiFi 配网"), C_BG, C_TEXT);
     lv_obj_set_ext_click_area(portal, 2);
     lv_obj_add_event_cb(portal, [](lv_event_t *e) {
         netcfg_set_mode(1);
@@ -1563,10 +1583,11 @@ static void build_settings() {
 
     lv_obj_t *c = pane(p, 6, 8, 468, 210);
     pane_title(c, "config", C_MUTED);
-    static const char *labels[6] = {"显示名称", "用量显示", "刷新间隔", "头像动效", "隐藏金额", "连接 magpie"};
-    for (int i = 0; i < 6; i++) {
-        lv_obj_t *r = U.set_row[i] = obj(c, 1, 3 + i * 34, 466, 34);
-        if (i < 5) {
+    const char *labels[SET_ROWS] = {T("显示名称"), T("用量显示"), T("刷新间隔"), T("头像动效"),
+                                    T("隐藏金额"), T("语言"), T("连接 magpie")};
+    for (int i = 0; i < SET_ROWS; i++) {
+        lv_obj_t *r = U.set_row[i] = obj(c, 1, 3 + i * SET_PITCH, 466, SET_PITCH);
+        if (i < SET_ROWS - 1) {
             lv_obj_set_style_border_width(r, 1, 0);
             lv_obj_set_style_border_side(r, LV_BORDER_SIDE_BOTTOM, 0);
             lv_obj_set_style_border_color(r, lv_color_hex(C_DIM), 0);
@@ -1574,12 +1595,12 @@ static void build_settings() {
         lv_obj_set_style_bg_color(r, lv_color_hex(C_DIM), LV_STATE_PRESSED);
         lv_obj_set_style_bg_opa(r, LV_OPA_COVER, LV_STATE_PRESSED);
         lv_obj_add_flag(r, LV_OBJ_FLAG_CLICKABLE);
-        txt(r, labels[i], 10, 11, &ark12, C_MUTED);
-        U.set_val[i] = txt_r(r, "--", 440, 11, 260, &ark12, C_TEXT);
-        txt(r, "»", 448, 11, &ark12, C_FAINT);
-        if (i == 0)
+        txt(r, labels[i], 10, 8, &ark12, C_MUTED);
+        U.set_val[i] = txt_r(r, "--", 440, 8, 260, &ark12, C_TEXT);
+        txt(r, "»", 448, 8, &ark12, C_FAINT);
+        if (i == ROW_NAME)
             lv_obj_add_event_cb(r, row_name_cb, LV_EVENT_CLICKED, NULL);
-        else if (i == 5)
+        else if (i == ROW_LINK)
             lv_obj_add_event_cb(r, [](lv_event_t *e) { link_panel_open(); }, LV_EVENT_CLICKED, NULL);
         else
             lv_obj_add_event_cb(r, row_cycle_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
@@ -1602,7 +1623,7 @@ static void chrome_status() {
     const time_t now = time(nullptr);
     struct tm tmv;
     localtime_r(&now, &tmv);
-    static const char *wd[7] = {"周日", "周一", "周二", "周三", "周四", "周五", "周六"};
+    const char *wd[7] = {T("周日"), T("周一"), T("周二"), T("周三"), T("周四"), T("周五"), T("周六")};
     if (tmv.tm_year > 120)
         snprintf(clock, sizeof(clock), "%d/%d %s %02d:%02d", tmv.tm_mon + 1, tmv.tm_mday,
                  wd[tmv.tm_wday], tmv.tm_hour, tmv.tm_min);
@@ -1617,18 +1638,20 @@ void ui_settings_refresh() {
     char b[40];
     snprintf(b, sizeof(b), "@%s", g_cfg.handle);
     set_txt(U.set_val[0], b);
-    set_txt(U.set_val[1], g_cfg.quota_mode ? "已用" : "剩余");
-    snprintf(b, sizeof(b), "%u 秒", (unsigned)g_cfg.refresh_s);
-    set_txt(U.set_val[2], b);
-    set_txt(U.set_val[3], g_cfg.anim ? "开" : "关");
-    set_txt(U.set_val[4], g_cfg.privacy ? "开" : "关");
-    if (U.set_val[5]) {
+    set_txt(U.set_val[ROW_QUOTA], g_cfg.quota_mode ? T("已用") : T("剩余"));
+    snprintf(b, sizeof(b), T("%u 秒"), (unsigned)g_cfg.refresh_s);
+    set_txt(U.set_val[ROW_REFRESH], b);
+    set_txt(U.set_val[ROW_ANIM], g_cfg.anim ? T("开") : T("关"));
+    set_txt(U.set_val[ROW_PRIVACY], g_cfg.privacy ? T("开") : T("关"));
+    // the row names the language in use, written in that language
+    set_txt(U.set_val[ROW_LANG], lang_get() == LANG_EN ? "English" : "中文");
+    if (U.set_val[ROW_LINK]) {
         // Show the pipe that is really carrying data, not just the preference:
         // with the fallback the two can differ.
         const char *live = gw_active_link();
-        if (!strcmp(live, "USB")) set_txt(U.set_val[5], "USB · 已连接");
-        else if (!strcmp(live, "WiFi")) set_txt(U.set_val[5], "WiFi · 已连接");
-        else set_txt(U.set_val[5], g_cfg.link_mode ? "WiFi · 未连接" : "USB · 未连接");
+        if (!strcmp(live, "USB")) set_txt(U.set_val[ROW_LINK], T("USB · 已连接"));
+        else if (!strcmp(live, "WiFi")) set_txt(U.set_val[ROW_LINK], T("WiFi · 已连接"));
+        else set_txt(U.set_val[ROW_LINK], g_cfg.link_mode ? T("WiFi · 未连接") : T("USB · 未连接"));
     }
     chrome_prompt();  // the prompt carries the handle
     chrome_status();
@@ -1725,7 +1748,7 @@ void ui_settings_test() {
                   U.tb_prompt ? lv_label_get_text(U.tb_prompt) : "-");
 
     // the link row must open the connection panel, not just fire a refresh
-    tap_obj(U.set_row[5]);  // 连接 magpie
+    tap_obj(U.set_row[ROW_LINK]);  // 连接 magpie
     for (int i = 0; i < 8; i++) { lv_timer_handler(); delay(20); }
     cases++;
     pass = s_link != nullptr;
@@ -1753,14 +1776,10 @@ void ui_routes_scroll(int dy) {
 // ------------------------------------------------------------------ public
 static bool s_ui_ready = false;  // false during the initial page build
 
-void ui_init() {
-    assets_init();
-    lv_disp_t *d = lv_disp_get_default();
-    lv_theme_t *th = lv_theme_default_init(d, lv_palette_main(LV_PALETTE_GREEN),
-                                           lv_palette_main(LV_PALETTE_RED), true, &ark12);
-    lv_disp_set_theme(d, th);
-    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(C_BG), 0);
-
+// Every page is built once, with its final text: LVGL labels are cheap to update
+// but the layout (titles cut into pane borders, fixed columns) depends on the
+// wording, so a language change rebuilds the tree instead of patching strings.
+static void build_pages() {
     build_home();
     build_state(0, PG_STATE_THINK, false);
     build_state(1, PG_STATE_CODE, false);
@@ -1772,6 +1791,17 @@ void ui_init() {
     build_routes(PG_ROUTES_LIST);
     build_chrome();  // after the pages: drawn on top of them
     build_settings();
+}
+
+void ui_init() {
+    assets_init();
+    lv_disp_t *d = lv_disp_get_default();
+    lv_theme_t *th = lv_theme_default_init(d, lv_palette_main(LV_PALETTE_GREEN),
+                                           lv_palette_main(LV_PALETTE_RED), true, &ark12);
+    lv_disp_set_theme(d, th);
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(C_BG), 0);
+
+    build_pages();
 
     // typing dots of whichever avatar is on screen
     lv_timer_create(
@@ -1874,6 +1904,57 @@ void ui_goto(int page) {
     s_pending_page = -1;
     close_overlays();  // a keyboard / link panel must not float over another page
     apply_page(page);
+}
+
+// ---- interface language ------------------------------------------------
+// Switching rebuilds the object tree. It must not run inside a tap handler (the
+// row that was tapped is about to be deleted), so a tap only raises a flag and
+// loop() calls ui_rebuild() right after it persists the new preference.
+static bool s_lang_dirty = false;
+
+void ui_set_language(uint8_t lang) {
+    if (lang_get() == lang) return;
+    lang_set(lang);
+    g_cfg.lang = lang;
+    s_lang_dirty = true;
+    s_cfg_dirty = true;  // NVS write happens in the main loop, like every other row
+}
+
+bool ui_lang_take_dirty() {
+    const bool d = s_lang_dirty;
+    s_lang_dirty = false;
+    return d;
+}
+
+void ui_rebuild() {
+    const uint32_t t0 = millis();
+    close_overlays();          // keyboard + connection panel live on the top layer
+    ui_show_calibration(false);  // these three sit directly on the screen, and
+    if (s_test) ui_test_toggle();  // lv_obj_clean() would free them behind our back
+    qc_close();
+    // Animations keep raw object pointers (the breathing loop and the delayed
+    // bubble hide), so stop them before their objects go away.
+    lv_anim_del(s_av_home.box, NULL);
+    lv_anim_del(s_av_home.bubble, NULL);
+    for (int i = 0; i < 3; i++) {
+        lv_anim_del(s_av_state[i].box, NULL);
+        lv_anim_del(s_av_state[i].bubble, NULL);
+    }
+    lv_anim_del(s_av_sheet.box, NULL);
+    lv_anim_del(s_av_sheet.bubble, NULL);
+
+    lv_obj_clean(lv_scr_act());
+    memset(&U, 0, sizeof(U));
+    memset(&s_av_home, 0, sizeof(s_av_home));
+    memset(s_av_state, 0, sizeof(s_av_state));
+    memset(&s_av_sheet, 0, sizeof(s_av_sheet));
+    for (int i = 0; i < 4; i++) u_filter[i] = nullptr;
+
+    build_pages();
+    if (s_data) ui_update(*s_data);  // repaint with the data already on hand
+    apply_page(s_page);
+    Serial.printf("[ui] rebuilt for %s: %u ms\n", lang_get() == LANG_EN ? "en" : "zh",
+                  (unsigned)(millis() - t0));
 }
 
 void ui_next_page() { ui_goto(s_page + 1); }
@@ -2005,13 +2086,13 @@ static const char *fmt_ago(uint32_t t, char *buf, size_t n) {
     if (!t || now < 1700000000) return buf;
     const long s = (long)(now - (time_t)t);
     if (s < 60)
-        snprintf(buf, n, "刚刚");
+        snprintf(buf, n, T("刚刚"));
     else if (s < 3600)
-        snprintf(buf, n, "%ld 分钟前", s / 60);
+        snprintf(buf, n, T("%ld 分钟前"), s / 60);
     else if (s < 86400)
-        snprintf(buf, n, "%ld 小时前", s / 3600);
+        snprintf(buf, n, T("%ld 小时前"), s / 3600);
     else
-        snprintf(buf, n, "%ld 天前", s / 86400);
+        snprintf(buf, n, T("%ld 天前"), s / 86400);
     return buf;
 }
 
@@ -2040,7 +2121,7 @@ static void sheet_fill() {
     char b[32];
     set_txt(U.sh_name, agent_label(id, a ? a->name : ""));
     const char *model = a && a->model[0] ? a->model : (r ? r->model : "");
-    set_txtf(U.sh_model, "%s · %s", id, model[0] ? model : "默认模型");
+    set_txtf(U.sh_model, "%s · %s", id, model[0] ? model : T("默认模型"));
     set_txt(U.sh_num[0], a ? fmt_count(a->calls, b, sizeof(b)) : "0");
     set_txt(U.sh_num[1], a ? fmt_count(a->today, b, sizeof(b)) : "0");
     set_txt(U.sh_num[2], a ? fmt_count((uint64_t)a->tokens, b, sizeof(b)) : "0");
@@ -2048,19 +2129,19 @@ static void sheet_fill() {
     uint32_t total = 0;
     for (int i = 0; s_data && i < s_data->nagents; i++) total += s_data->agents[i].calls;
     const float share = total && a ? 100.0f * a->calls / total : 0;
-    set_txtf(U.sh_share, "占全部调用 %.0f%%", share);
+    set_txtf(U.sh_share, T("占全部调用 %.0f%%"), share);
     tbar_set(U.sh_bar, share, sk->accent);
     const bool live = agent_live(a);
     avatar_mode(s_av_sheet, live ? AV_THINK : AV_IDLE);
     if (live)
-        set_txt(U.sh_last, "● 工作中");
+        set_txt(U.sh_last, T("● 工作中"));
     else if (a && a->last)
-        set_txtf(U.sh_last, "最近 %s", fmt_ago(a->last, b, sizeof(b)));
+        set_txtf(U.sh_last, T("最近 %s"), fmt_ago(a->last, b, sizeof(b)));
     else
-        set_txt(U.sh_last, a && a->calls ? "" : "还没用过");
+        set_txt(U.sh_last, a && a->calls ? "" : T("还没用过"));
     set_color(U.sh_last, live ? C_GREEN : C_MUTED);
     const bool following = s_focus[0] && !strcmp(s_focus, id);
-    set_txt(lv_obj_get_child(U.sh_follow, 0), following ? "取消跟随" : "跟随");
+    set_txt(lv_obj_get_child(U.sh_follow, 0), following ? T("取消跟随") : T("跟随"));
     set_bg(U.sh_follow, following ? C_DIM : C_CYAN);
     lv_obj_set_style_border_color(U.sh_follow, lv_color_hex(following ? C_LINE : C_CYAN), 0);
     set_color(lv_obj_get_child(U.sh_follow, 0), following ? C_TEXT : C_BG);
@@ -2068,13 +2149,13 @@ static void sheet_fill() {
 
 static void tag_for(const RouteRow &r, char *buf, size_t n, uint32_t *col) {
     if (r.status && r.status != 200) {
-        snprintf(buf, n, "错误 %u", (unsigned)r.status);
+        snprintf(buf, n, T("错误 %u"), (unsigned)r.status);
         *col = C_RED;
     } else if (!strcmp(r.stop, "tool_calls") || !strcmp(r.stop, "tool_use")) {
-        snprintf(buf, n, "工具调用");
+        snprintf(buf, n, T("工具调用"));
         *col = C_AMBER;
     } else {
-        snprintf(buf, n, "回复");
+        snprintf(buf, n, T("回复"));
         *col = C_GREEN;
     }
 }
@@ -2138,13 +2219,13 @@ void ui_update(const DashData &d) {
     static bool prev_live = false;
     if (prev_live && !live && d.gw) {  // work just finished
         avatar_hop(s_av_home);
-        avatar_say(s_av_home, "做完了", 1800);
+        avatar_say(s_av_home, T("做完了"), 1800);
     }
     prev_live = live;
     s_live_state = live;
     if (switched) {
         avatar_hop(s_av_home);
-        avatar_say(s_av_home, sk->say[0], 2500);
+        avatar_say(s_av_home, say_for(sk, 0), 2500);
     }
     set_txt(U.hm_name, fname);
     {
@@ -2152,15 +2233,15 @@ void ui_update(const DashData &d) {
         set_txtf(U.hm_sub, "%s%s%s", fid, model[0] ? " · " : "", model);
     }
     if (!d.gw)
-        set_txt(U.hm_state, "等待网关");
+        set_txt(U.hm_state, T("等待网关"));
     else if (live)
-        set_txt(U.hm_state, tool ? "运行命令" : "工作中");
+        set_txt(U.hm_state, tool ? T("运行命令") : T("工作中"));
     else if (fst && fst->last)
-        set_txtf(U.hm_state, "最近 %s", fmt_ago(fst->last, nb2, sizeof(nb2)));
+        set_txtf(U.hm_state, T("最近 %s"), fmt_ago(fst->last, nb2, sizeof(nb2)));
     else if (frow)
-        set_txtf(U.hm_state, "最近 %s", frow->time);
+        set_txtf(U.hm_state, T("最近 %s"), frow->time);
     else
-        set_txt(U.hm_state, "空闲");
+        set_txt(U.hm_state, T("空闲"));
     set_color(U.hm_state, live ? C_GREEN : C_MUTED);
     const QuotaWindow *hw[2] = {w0, w1};
     for (int k = 0; k < 2; k++) {
@@ -2178,15 +2259,15 @@ void ui_update(const DashData &d) {
         set_color(U.hm_qpct[k], remain_col(hw[k]->remaining));
         tbar_set(U.hm_qbar[k], q_show(hw[k]), remain_col(hw[k]->remaining));
     }
-    set_txtf(U.hm_today, "%s 次", fst ? fmt_count(fst->today, nb, sizeof(nb)) : "0");
-    set_txtf(U.hm_30d, "%s 次", fst ? fmt_count(fst->calls, nb, sizeof(nb)) : "0");
+    set_txtf(U.hm_today, T("%s 次"), fst ? fmt_count(fst->today, nb, sizeof(nb)) : "0");
+    set_txtf(U.hm_30d, T("%s 次"), fst ? fmt_count(fst->calls, nb, sizeof(nb)) : "0");
     set_txt(U.hm_reset, reset);
 
     set_txt(U.mg_state, d.gw ? "● online" : "● offline");
     set_color(U.mg_state, d.gw ? C_GREEN : C_FAINT);
     set_txtf(U.mg_calls, "%u", (unsigned)d.today_calls);
     set_txt(U.mg_tok, fmt_count((uint64_t)d.today_tokens, nb, sizeof(nb)));
-    set_txtf(U.mg_costk, "费用 %s", d.period);
+    set_txtf(U.mg_costk, T("费用 %s"), d.period);
     fmt_cost(U.mg_cost, d.cost);
     set_txtf(U.mg_sess, "%d", d.sessions);
     set_txt(U.mg_last, d.nrows ? d.rows[0].time : "--");
@@ -2207,16 +2288,16 @@ void ui_update(const DashData &d) {
         for (int k = 0; k < 3; k++) set_bg(U.st_pip[i][k], k == i ? sk->accent : C_DIM);
         set_txt(U.st_name[i], fname);
         set_txt(U.st_title_l[i], fid);
-        set_txtf(U.st_sess[i], "%d 个会话", d.sessions);
+        set_txtf(U.st_sess[i], T("%d 个会话"), d.sessions);
         if (frow) {
             if (i == 0)
-                set_txtf(U.st_sub[i], "已用时 %s", fmt_secs(frow->ms, nb2, sizeof(nb2)));
+                set_txtf(U.st_sub[i], T("已用时 %s"), fmt_secs(frow->ms, nb2, sizeof(nb2)));
             else if (i == 1)
                 set_txt(U.st_sub[i], frow->model);
             else
-                set_txtf(U.st_sub[i], "运行命令 : %s", frow->model);
+                set_txtf(U.st_sub[i], T("运行命令 : %s"), frow->model);
         } else {
-            set_txt(U.st_sub[i], "暂无调用");
+            set_txt(U.st_sub[i], T("暂无调用"));
         }
 
         if (w0) {
@@ -2241,10 +2322,10 @@ void ui_update(const DashData &d) {
         }
         set_txt(U.st_reset[i], reset[0] ? reset : "");
         if (fq)
-            set_txtf(U.st_src[i], "额度来源 %s · %s", fq->name, fq->plan);
+            set_txtf(U.st_src[i], T("额度来源 %s · %s"), fq->name, fq->plan);
         else
             set_txt(U.st_src[i], "");
-        set_txt(U.st_conn[i], d.gw ? "已连接" : "未连接");
+        set_txt(U.st_conn[i], d.gw ? T("已连接") : T("未连接"));
         set_color(U.st_conn[i], d.gw ? C_GREEN : C_MUTED);
         set_bg(U.st_conn_dot[i], d.gw ? C_GREEN : C_FAINT);
     }
@@ -2252,7 +2333,7 @@ void ui_update(const DashData &d) {
     // -------------------------------------------------- agents
     static AgentView views[AG_ROWS];
     const int nv = agent_views(d, views, AG_ROWS);
-    set_txtf(U.ag_count, "%d 个", nv);
+    set_txtf(U.ag_count, T("%d 个"), nv);
     for (int i = 0; i < AG_ROWS; i++) {
         show(U.ag_row[i], i < nv);
         if (i >= nv) {
@@ -2268,21 +2349,21 @@ void ui_update(const DashData &d) {
         show(U.ag_live[i], alives);
         // working / finished / idle, spelled out: a bare dot was not readable
         if (alives) {
-            set_txt(U.ag_state[i], "工作中");
+            set_txt(U.ag_state[i], T("工作中"));
             set_color(U.ag_state[i], C_AMBER);
         } else if (ast && ast->today) {
-            set_txt(U.ag_state[i], "已完成");
+            set_txt(U.ag_state[i], T("已完成"));
             set_color(U.ag_state[i], C_GREEN);
         } else if (ast && (ast->last || ast->calls)) {
-            set_txt(U.ag_state[i], "空闲");
+            set_txt(U.ag_state[i], T("空闲"));
             set_color(U.ag_state[i], C_MUTED);
         } else {
-            set_txt(U.ag_state[i], "未使用");
+            set_txt(U.ag_state[i], T("未使用"));
             set_color(U.ag_state[i], C_FAINT);
         }
         set_txt(U.ag_name[i], agent_label(v.id, v.name));
         set_color(U.ag_name[i], v.calls ? C_TEXT : C_MUTED);
-        set_txt(U.ag_detail[i], v.model[0] ? v.model : "默认模型");
+        set_txt(U.ag_detail[i], v.model[0] ? v.model : T("默认模型"));
         if (v.calls) {
             set_txt(U.ag_calls[i], fmt_count(v.calls, nb, sizeof(nb)));
             set_color(U.ag_calls[i], C_GREEN);
@@ -2320,7 +2401,7 @@ void ui_update(const DashData &d) {
             show(U.q_rst[i][j], has);
             if (!has) {
                 if (j == 0 && !q->nwin) {
-                    set_txtf(U.q_key[i][j], "最近 %s", q->lastServed[0] ? q->lastServed : "--");
+                    set_txtf(U.q_key[i][j], T("最近 %s"), q->lastServed[0] ? q->lastServed : "--");
                     lv_obj_set_width(U.q_key[i][j], 440);
                 }
                 continue;
@@ -2344,13 +2425,13 @@ void ui_update(const DashData &d) {
     set_txtf(U.u_out, "out   %s", fmt_count(d.tok_out, b2, sizeof(b2)));
     set_txtf(U.u_cache, "cache %s", fmt_count(d.tok_cache, b3, sizeof(b3)));
     set_txtf(U.u_calls, "%u", (unsigned)d.calls);
-    set_txtf(U.u_err, "%u 次失败", (unsigned)d.errors);
+    set_txtf(U.u_err, T("%u 次失败"), (unsigned)d.errors);
     set_color(U.u_err, d.errors ? C_RED : C_MUTED);
     // the cost pane's subtitle: what a call costs on average for this window
     if (g_cfg.privacy || d.calls == 0)
         set_txt(U.u_price, "");
     else
-        set_txtf(U.u_price, "均价 $%.4f", d.cost / (float)d.calls);
+        set_txtf(U.u_price, T("均价 $%.4f"), d.cost / (float)d.calls);
     fmt_cost(U.u_cost, d.cost);
     set_txtf(U.u_hit, "%.0f%%", d.hit_rate());
     {
@@ -2377,7 +2458,7 @@ void ui_update(const DashData &d) {
     // -------------------------------------------------- routes
     for (int pg_i = 0; pg_i < 2; pg_i++) {
         show(U.r_empty[pg_i], d.nrows == 0);
-        set_txtf(U.r_count[pg_i], "%d 条", d.nrows);
+        set_txtf(U.r_count[pg_i], T("%d 条"), d.nrows);
         for (int i = 0; i < RT_ROWS; i++) {
             const bool has = i < d.nrows;
             show(U.r_row[pg_i][i], has);
@@ -2391,7 +2472,8 @@ void ui_update(const DashData &d) {
             set_txt(U.r_tag[pg_i][i], lb);
             set_color(U.r_tag[pg_i][i], tc);
             set_txt(U.r_time[pg_i][i], r.time);
-            const char *prov = !strncmp(r.provider, "session-", 8) ? "会话" : r.provider;
+            // same Chinese word as the home pane's "sessions", but singular here
+            const char *prov = !strncmp(r.provider, "session-", 8) ? L("会话", "session") : r.provider;
             if (r.account[0])
                 set_txtf(U.r_flow[pg_i][i], "→ %s · %s", prov, r.account);
             else
@@ -2415,7 +2497,7 @@ void ui_update(const DashData &d) {
         set_bg(U.r_top_dot, C_FAINT);
     }
     for (int k = 0; k < 2; k++)
-        set_txtf(U.r_sum[k], "今天 %u 次调用 · %s token", (unsigned)d.today_calls,
+        set_txtf(U.r_sum[k], T("今天 %u 次调用 · %s token"), (unsigned)d.today_calls,
                  fmt_count((uint64_t)d.today_tokens, b1, sizeof(b1)));
 
     avatars_sync_motion(live);

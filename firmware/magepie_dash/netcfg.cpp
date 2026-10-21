@@ -1,5 +1,7 @@
 #include "netcfg.h"
 
+#include "i18n.h"
+
 #include "appcfg.h"
 
 #include <Preferences.h>
@@ -54,8 +56,34 @@ border-radius:8px;font-size:15px;font-weight:600}
 <div class="hint">提示：电脑与这块屏要在同一个路由器下；电脑 IP 可以在 ipconfig / 系统设置里查到。</div>
 </body></html>)HTML";
 
+// The setup page is read on a phone, so it follows the panel's language. Same
+// markup, English wording (the WiFi/SSID/port fields stay as they are).
+static const char *PORTAL_HTML_EN = R"HTML(<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>magpie dash setup</title><style>
+body{background:#080C10;color:#EEEEF6;font-family:system-ui,-apple-system,sans-serif;margin:0;padding:24px}
+h1{font-size:18px;color:#DE7552;font-weight:600;margin:0 0 4px}
+p.sub{color:#7E7C89;font-size:12px;margin:0 0 20px}
+label{display:block;font-size:12px;color:#9A98A8;margin:14px 0 6px}
+input{width:100%;box-sizing:border-box;background:#181820;border:1px solid #383749;color:#EEEEF6;
+padding:10px 12px;border-radius:8px;font-size:14px;outline:none}
+input:focus{border-color:#7B6DFF}
+button{width:100%;margin-top:22px;background:#7B6DFF;color:#fff;border:0;padding:12px;
+border-radius:8px;font-size:15px;font-weight:600}
+.hint{color:#5C5A68;font-size:11px;margin-top:16px;line-height:1.5}
+</style></head><body>
+<h1>magpie dash</h1><p class="sub">Join WiFi, enter the gateway address, save to reboot</p>
+<form method="POST" action="/save">
+<label>WiFi SSID</label><input name="ssid" value="%SSID%" required>
+<label>Password</label><input name="pass" type="password" value="%PASS%">
+<label>Gateway IP (host PC running magpie)</label><input name="host" value="%HOST%" placeholder="192.168.1.100" required>
+<label>Port</label><input name="port" value="%PORT%" required>
+<button type="submit">Save & Reboot</button></form>
+<div class="hint">Note: the PC and this screen must be on the same router. Find the PC's IP with ipconfig (Windows) or ifconfig (macOS/Linux).</div>
+</body></html>)HTML";
+
 static void handle_root() {
-    String html = PORTAL_HTML;
+    String html = lang_get() == LANG_EN ? PORTAL_HTML_EN : PORTAL_HTML;
     html.replace("%SSID%", s_ssid);
     html.replace("%PASS%", s_pass);
     html.replace("%HOST%", s_host.length() ? s_host : String(GW_HOST_DEFAULT));
@@ -80,8 +108,9 @@ static void handle_save() {
     prefs.putUShort("port", (uint16_t)port);
     prefs.end();
     server.send(200, "text/html; charset=utf-8",
-                "<meta charset=utf-8><body style='background:#080C10;color:#EEEEF6;"
-                "font-family:sans-serif;padding:40px'>已保存，正在重启…</body>");
+                String("<meta charset=utf-8><body style='background:#080C10;color:#EEEEF6;"
+                       "font-family:sans-serif;padding:40px'>") +
+                    T("已保存，正在重启…") + "</body>");
     delay(800);
     ESP.restart();
 }

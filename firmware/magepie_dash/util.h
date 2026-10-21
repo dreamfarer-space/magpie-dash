@@ -5,6 +5,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "i18n.h"  // T(): the same formatters serve both languages
+
 // 1090000000 -> "1.09B", 634000 -> "634K", 1520 -> "1.5K"
 static inline const char *fmt_count(uint64_t v, char *buf, size_t n) {
     if (v >= 1000000000ULL)
@@ -34,9 +36,9 @@ static inline const char *fmt_k(uint64_t v, char *buf, size_t n) {
 // 4800 ms -> "4.8 秒"
 static inline const char *fmt_secs(uint32_t ms, char *buf, size_t n) {
     if (ms >= 60000)
-        snprintf(buf, n, "%u分%u秒", (unsigned)(ms / 60000), (unsigned)((ms / 1000) % 60));
+        snprintf(buf, n, T("%u分%u秒"), (unsigned)(ms / 60000), (unsigned)((ms / 1000) % 60));
     else if (ms >= 1000)
-        snprintf(buf, n, "%.1f 秒", ms / 1000.0);
+        snprintf(buf, n, T("%.1f 秒"), ms / 1000.0);
     else
         snprintf(buf, n, "%ums", (unsigned)ms);
     return buf;
@@ -63,16 +65,16 @@ static inline void fmt_countdown(time_t when, char *buf, size_t n) {
     if (!when || now < 1700000000) return;
     long d = when - now;
     if (d <= 0) {
-        snprintf(buf, n, "将重置");
+        snprintf(buf, n, T("将重置"));
         return;
     }
     long days = d / 86400, hours = (d % 86400) / 3600;
     if (days > 0)
-        snprintf(buf, n, "%ld 天 %ld 小时后重置", days, hours);
+        snprintf(buf, n, T("%ld 天 %ld 小时后重置"), days, hours);
     else if (hours > 0)
-        snprintf(buf, n, "%ld 小时后重置", hours);
+        snprintf(buf, n, T("%ld 小时后重置"), hours);
     else
-        snprintf(buf, n, "%ld 分钟后重置", (d % 3600) / 60);
+        snprintf(buf, n, T("%ld 分钟后重置"), (d % 3600) / 60);
 }
 
 // "2026-10-19T18:59:00-07:00" -> "10月19日 18:59" (Chinese) or "10/19 18:59"
@@ -93,7 +95,7 @@ static inline void fmt_reset(const char *iso, char *buf, size_t n) {
         const char *c = strchr(t, ':');
         if (c) mm = atoi(c + 1);
     }
-    snprintf(buf, n, "%d月%d日 %02d:%02d", mon, day, hh, mm);
+    snprintf(buf, n, T("%d月%d日 %02d:%02d"), mon, day, hh, mm);
 }
 
 // br***@gmail.com — keeps the design's masked style.

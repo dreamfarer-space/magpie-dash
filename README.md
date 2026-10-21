@@ -36,7 +36,7 @@ Terminal style: the top row is a shell prompt (`user@magpie:~/agents$`, blinking
 | **`额度`** | One pane per upstream account. Each quota window displays a `■` progress bar, percentage, and reset time. |
 | **`用量`** | Today / 7 days / 30 days / All: tokens (input / output / cache), requests and failures, cost and average price, cache hit rate, time-bucketed bar chart. |
 | **Routes** | Topology of the latest request (`agent ──▶ magpie ──▶ upstream account`) above a scrollable request log. Tap the top bar to expand into a full-page log. |
-| **Settings** | Display name (on-screen keyboard), remaining / used quota toggle, refresh interval, avatar animation, hide cost toggle, connection mode (USB / WiFi). |
+| **Settings** | Display name (on-screen keyboard), remaining / used quota toggle, refresh interval, avatar animation, hide cost toggle, **language (English / 中文)**, connection mode (USB / WiFi). |
 
 | | | |
 |---|---|---|
@@ -50,6 +50,21 @@ Terminal style: the top row is a shell prompt (`user@magpie:~/agents$`, blinking
 - Tap the avatar: the sprite jumps and displays its catchphrase (e.g. Claude Code "Clauding...", Codex "> codex exec"); tapping 5 times triggers a complaint.
 - "Follow" in Agent details pins the Home and Status pages to that agent, reverting to "follow latest request" after 10 minutes.
 - Long-press the top prompt bar to enter two-point touch calibration.
+
+### Language
+
+The shipped build speaks **English**; Settings → `language` switches the whole panel to **中文** in one tap. The same choice drives the WiFi setup page the board serves to your phone.
+
+- Everything follows it: pane titles, the htop tab bar, quota wording (`5h quota` / `5 小时额度`), countdowns (`resets in 3d 21h` / `3 天 21 小时后重置`), relative times, the weekday in the prompt bar, the agent catchphrases and the buttons on the touch keyboard.
+- Strings live in [`firmware/magepie_dash/i18n.cpp`](firmware/magepie_dash/i18n.cpp), keyed by the Chinese text: a call site reads `T("等待网关")`, and an entry that is missing degrades to Chinese rather than a blank label. `python tools/check_i18n.py` (run in CI) fails when a `T()` has no entry or a translation drops a `%d`.
+- Switching rebuilds the LVGL object tree, because the column layout depends on the wording. That costs ~0.95 s on the board — the same work a cold boot does — and the choice is stored in NVS, so the board comes back in the language you left it in.
+- Serial `U` toggles it without touching the screen, which is how both language sets of screenshots were captured.
+
+| | |
+|---|---|
+| ![English home page](docs/screen-home-en.png) | ![English config page](docs/screen-config-en.png) |
+
+The screenshots in this README were captured with the Chinese build; send `U` on your board to reproduce them in English.
 
 ## Hardware
 
@@ -178,6 +193,7 @@ While the USB bridge is running, raw serial bytes are discarded. Commands must b
 | `G` / `H` | Scroll route log up / down |
 | `T` / `c` `x` / `K` | Color and touch direction test pattern / Open, close calibration screen / Clear touch calibration from NVS |
 | `t` / `d` / `V` / `D` | Raw touch coordinates / Object tree dump / Toggle per-event logging / Reset settings to defaults |
+| `U` | Toggle the interface language (same path as the `language` row; the screens rebuild) |
 
 `A`, `Z`, and `B` validate LVGL hit detection and navigation logic directly without querying the GT911. Physical touch behavior must be verified on hardware.
 
@@ -189,7 +205,8 @@ While the USB bridge is running, raw serial bytes are discarded. Commands must b
 ## Repository layout
 
 ```
-firmware/magepie_dash/   Arduino project (ui.cpp: UI, gateway.cpp: data polling, usb_link.cpp: protocol, display_port.cpp: display and touch)
+firmware/magepie_dash/   Arduino project (ui.cpp: UI, i18n.cpp: Chinese/English strings, gateway.cpp: data polling,
+                         usb_link.cpp: protocol, display_port.cpp: display and touch)
 firmware/lv_conf.h       LVGL configuration; copy to Arduino libraries/ directory
 tools/                   USB bridge, relay, font/sprite generators, screenshot/recording tools, regression tests
 docs/                    Screenshots and demo assets for README
