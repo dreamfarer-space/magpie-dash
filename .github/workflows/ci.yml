@@ -26,10 +26,10 @@ env:
 jobs:
   tools:
     name: host tools
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Byte-compile every tool
@@ -42,12 +42,12 @@ jobs:
 
   firmware:
     name: firmware (ESP32-S3)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: arduino/setup-arduino-cli@v2
       - name: Cache core and libraries
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.arduino15
@@ -67,7 +67,7 @@ jobs:
           arduino-cli compile --fqbn "$FQBN" --warnings default \
             --output-dir dist firmware/magepie_dash 2>&1 | tee build.log
           grep -E "Sketch uses|Global variables" build.log >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: magpie-dash-firmware
           path: |
